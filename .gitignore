@@ -1,1 +1,28 @@
-/target
+# Rust
+/target/
+**/*.rs.bk
+
+# AppImage / linuxdeploy
+AppDir/
+squashfs-root/
+*.AppImage
+linuxdeploy-*.AppImage
+appimagetool-*.AppImage
+
+# Generated icons / temp
+*.png~
+*.svg~
+*.ico
+
+# Core dumps
+core
+core.*
+*.core
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Logs
+*.log

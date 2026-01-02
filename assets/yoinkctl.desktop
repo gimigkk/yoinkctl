@@ -1,0 +1,21 @@
+[Desktop Entry]
+Name=yoinkctl
+GenericName=Color Picker
+Comment=Fast, beautiful color picker with global hotkey support
+Exec=yoinkctl
+Icon=yoinkctl
+Terminal=false
+Type=Application
+Categories=Utility;
+Keywords=color;picker;screenshot;eyedropper;
+StartupNotify=true
+StartupWMClass=yoinkctl
+Actions=Pick;Daemon;
+
+[Desktop Action Pick]
+Name=Pick Color
+Exec=yoinkctl pick
+
+[Desktop Action Daemon]
+Name=Start Daemon
+Exec=yoinkctl daemon
