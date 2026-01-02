@@ -3,6 +3,7 @@ use xcap::Monitor;
 use image::RgbaImage;
 use arboard::Clipboard;
 use std::process::Command;
+use crate::config::Config;
 
 pub struct ColorPicker {
     screenshot: Option<RgbaImage>,
@@ -10,6 +11,7 @@ pub struct ColorPicker {
     cursor_pos: egui::Pos2,
     should_close: bool,
     made_sticky: bool,
+    config: Config,
 }
 
 impl ColorPicker {
@@ -22,6 +24,7 @@ impl ColorPicker {
             cursor_pos: egui::Pos2::ZERO,
             should_close: false,
             made_sticky: false,
+            config: Config::load().unwrap_or_default(),
         }
     }
     
@@ -183,6 +186,41 @@ for (var i = 0; i < clients.length; i++) {
             }
         }
     }
+    
+    // Calculate smart position for magnifier to keep it on screen
+    fn calculate_magnifier_position(&self, mag_size: f32, info_height: f32, screen_rect: egui::Rect) -> egui::Vec2 {
+        let margin = 30.0; // X and Y offset when cursor goes down/right
+        let small_margin = 30.0; // Y offset when cursor goes up (reduced margin for top positioning)
+        let total_height = mag_size + info_height + 10.0; // mag + gap + info box
+        
+        // Default offset (bottom-right of cursor)
+        let mut offset_x = margin;
+        let mut offset_y = margin;
+        
+        // Check right edge
+        if self.cursor_pos.x + margin + mag_size > screen_rect.max.x {
+            // Move to left side of cursor
+            offset_x = -(mag_size + margin);
+        }
+        
+        // Check bottom edge
+        if self.cursor_pos.y + margin + total_height > screen_rect.max.y {
+            // Move to top side of cursor with smaller margin
+            offset_y = -(mag_size + small_margin);
+        }
+        
+        // Check top edge (when moved up)
+        if self.cursor_pos.y + offset_y < screen_rect.min.y {
+            offset_y = -self.cursor_pos.y + small_margin + screen_rect.min.y;
+        }
+        
+        // Check left edge (when moved left)
+        if self.cursor_pos.x + offset_x < screen_rect.min.x {
+            offset_x = -self.cursor_pos.x + margin + screen_rect.min.x;
+        }
+        
+        egui::vec2(offset_x, offset_y)
+    }
 }
 
 impl eframe::App for ColorPicker {
@@ -231,10 +269,22 @@ impl eframe::App for ColorPicker {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(egui::Color32::TRANSPARENT))
             .show(ctx, |ui| {
+                // Get the actual screen rect from the UI
+                let screen_rect = ui.max_rect();
+                
                 // Draw magnifying glass and info
                 if let Some(color) = self.get_color_at_cursor() {
-                    let mag_size = 150.0;
-                    let mag_offset = egui::vec2(25.0, 25.0);
+                    let mag_size = self.config.preview_size as f32;
+                    
+                    // Calculate info height based on what's shown
+                    let mut line_count = 0;
+                    if self.config.show_hex { line_count += 1; }
+                    if self.config.show_rgb { line_count += 1; }
+                    if self.config.show_hsl { line_count += 1; }
+                    let info_height = if line_count > 0 { 15.0 + (line_count as f32 * 20.0) } else { 0.0 };
+                    
+                    // Calculate smart position based on cursor location
+                    let mag_offset = self.calculate_magnifier_position(mag_size, info_height, screen_rect);
                     let mag_pos = self.cursor_pos + mag_offset;
                     
                     // Draw zoomed pixels (11x11 grid)
@@ -284,39 +334,157 @@ impl eframe::App for ColorPicker {
                         egui::Stroke::new(3.0, egui::Color32::WHITE),
                     );
                     
-                    // Text info below magnifier
-                    let info_y = mag_pos.y + mag_size + 10.0;
-                    
-                    let text_bg = egui::Rect::from_min_size(
-                        egui::pos2(mag_pos.x, info_y),
-                        egui::vec2(mag_size, 45.0),
-                    );
-                    ui.painter().rect_filled(
-                        text_bg,
-                        4.0,
-                        egui::Color32::from_black_alpha(200),
-                    );
-                    
-                    let hex = format!("#{:02X}{:02X}{:02X}", color.r(), color.g(), color.b());
-                    let rgb = format!("RGB({}, {}, {})", color.r(), color.g(), color.b());
-                    
-                    let text_center_x = mag_pos.x + mag_size / 2.0;
-                    
-                    ui.painter().text(
-                        egui::pos2(text_center_x, info_y + 10.0),
-                        egui::Align2::CENTER_TOP,
-                        &hex,
-                        egui::FontId::monospace(18.0),
-                        egui::Color32::WHITE,
-                    );
-                    
-                    ui.painter().text(
-                        egui::pos2(text_center_x, info_y + 30.0),
-                        egui::Align2::CENTER_TOP,
-                        &rgb,
-                        egui::FontId::monospace(13.0),
-                        egui::Color32::from_gray(200),
-                    );
+                    // Text info below magnifier (adjust position based on where magnifier is)
+                    if info_height > 0.0 {
+                        let info_y = if mag_offset.y < 0.0 {
+                            // Magnifier is above cursor, put info above magnifier
+                            mag_pos.y - info_height - 10.0
+                        } else {
+                            // Magnifier is below cursor, put info below magnifier
+                            mag_pos.y + mag_size + 10.0
+                        };
+                        
+                        // Calculate maximum text width
+                        let mut max_text_width = 0.0f32;
+                        let padding = 16.0;
+                        
+                        if self.config.show_hex {
+                            let hex = format!("#{:02X}{:02X}{:02X}", color.r(), color.g(), color.b());
+                            let galley = ui.painter().layout_no_wrap(
+                                hex,
+                                egui::FontId::monospace(16.0),
+                                egui::Color32::WHITE,
+                            );
+                            max_text_width = max_text_width.max(galley.size().x);
+                        }
+                        
+                        if self.config.show_rgb {
+                            let rgb = format!("RGB({}, {}, {})", color.r(), color.g(), color.b());
+                            let galley = ui.painter().layout_no_wrap(
+                                rgb,
+                                egui::FontId::monospace(13.0),
+                                egui::Color32::WHITE,
+                            );
+                            max_text_width = max_text_width.max(galley.size().x);
+                        }
+                        
+                        if self.config.show_hsl {
+                            // Convert RGB to HSL for measurement
+                            let r = color.r() as f32 / 255.0;
+                            let g = color.g() as f32 / 255.0;
+                            let b = color.b() as f32 / 255.0;
+                            
+                            let max_val = r.max(g).max(b);
+                            let min_val = r.min(g).min(b);
+                            let delta = max_val - min_val;
+                            
+                            let l = (max_val + min_val) / 2.0;
+                            let s = if delta == 0.0 {
+                                0.0
+                            } else {
+                                delta / (1.0 - (2.0 * l - 1.0).abs())
+                            };
+                            
+                            let h = if delta == 0.0 {
+                                0.0
+                            } else if max_val == r {
+                                60.0 * (((g - b) / delta) % 6.0)
+                            } else if max_val == g {
+                                60.0 * (((b - r) / delta) + 2.0)
+                            } else {
+                                60.0 * (((r - g) / delta) + 4.0)
+                            };
+                            
+                            let h = if h < 0.0 { h + 360.0 } else { h };
+                            let hsl = format!("HSL({:.0}, {:.0}%, {:.0}%)", h, s * 100.0, l * 100.0);
+                            
+                            let galley = ui.painter().layout_no_wrap(
+                                hsl,
+                                egui::FontId::monospace(13.0),
+                                egui::Color32::WHITE,
+                            );
+                            max_text_width = max_text_width.max(galley.size().x);
+                        }
+                        
+                        let text_box_width = max_text_width + padding * 2.0;
+                        let text_box_x = mag_pos.x + (mag_size - text_box_width) / 2.0;
+                        
+                        let text_bg = egui::Rect::from_min_size(
+                            egui::pos2(text_box_x, info_y),
+                            egui::vec2(text_box_width, info_height),
+                        );
+                        ui.painter().rect_filled(
+                            text_bg,
+                            4.0,
+                            egui::Color32::from_black_alpha(200),
+                        );
+                        
+                        let text_center_x = text_box_x + text_box_width / 2.0;
+                        let mut current_y = info_y + 10.0;
+                        
+                        if self.config.show_hex {
+                            let hex = format!("#{:02X}{:02X}{:02X}", color.r(), color.g(), color.b());
+                            ui.painter().text(
+                                egui::pos2(text_center_x, current_y),
+                                egui::Align2::CENTER_TOP,
+                                &hex,
+                                egui::FontId::monospace(16.0),
+                                egui::Color32::WHITE,
+                            );
+                            current_y += 20.0;
+                        }
+                        
+                        if self.config.show_rgb {
+                            let rgb = format!("RGB({}, {}, {})", color.r(), color.g(), color.b());
+                            ui.painter().text(
+                                egui::pos2(text_center_x, current_y),
+                                egui::Align2::CENTER_TOP,
+                                &rgb,
+                                egui::FontId::monospace(13.0),
+                                egui::Color32::from_gray(200),
+                            );
+                            current_y += 20.0;
+                        }
+                        
+                        if self.config.show_hsl {
+                            // Convert RGB to HSL
+                            let r = color.r() as f32 / 255.0;
+                            let g = color.g() as f32 / 255.0;
+                            let b = color.b() as f32 / 255.0;
+                            
+                            let max = r.max(g).max(b);
+                            let min = r.min(g).min(b);
+                            let delta = max - min;
+                            
+                            let l = (max + min) / 2.0;
+                            let s = if delta == 0.0 {
+                                0.0
+                            } else {
+                                delta / (1.0 - (2.0 * l - 1.0).abs())
+                            };
+                            
+                            let h = if delta == 0.0 {
+                                0.0
+                            } else if max == r {
+                                60.0 * (((g - b) / delta) % 6.0)
+                            } else if max == g {
+                                60.0 * (((b - r) / delta) + 2.0)
+                            } else {
+                                60.0 * (((r - g) / delta) + 4.0)
+                            };
+                            
+                            let h = if h < 0.0 { h + 360.0 } else { h };
+                            
+                            let hsl = format!("HSL({:.0}, {:.0}%, {:.0}%)", h, s * 100.0, l * 100.0);
+                            ui.painter().text(
+                                egui::pos2(text_center_x, current_y),
+                                egui::Align2::CENTER_TOP,
+                                &hsl,
+                                egui::FontId::monospace(13.0),
+                                egui::Color32::from_gray(200),
+                            );
+                        }
+                    }
                 }
                 
                 // Draw crosshair at cursor

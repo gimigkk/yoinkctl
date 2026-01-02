@@ -54,6 +54,63 @@ impl Config {
         let config_dir = dirs::config_dir()
             .ok_or_else(|| anyhow::anyhow!("Could not find config directory"))?;
         
-        Ok(config_dir.join("chromasnap").join("config.json"))
+        Ok(config_dir.join("yoinkctl").join("config.json"))
+    }
+    
+    // Parse hotkey string into modifiers and key
+    pub fn get_modifiers(&self) -> global_hotkey::hotkey::Modifiers {
+        use global_hotkey::hotkey::Modifiers;
+        
+        let parts: Vec<&str> = self.hotkey.split('+').collect();
+        let mut modifiers = Modifiers::empty();
+        
+        for part in &parts[..parts.len().saturating_sub(1)] {
+            match part.trim() {
+                "Super" | "Meta" => modifiers |= Modifiers::SUPER,
+                "Shift" => modifiers |= Modifiers::SHIFT,
+                "Ctrl" | "Control" => modifiers |= Modifiers::CONTROL,
+                "Alt" => modifiers |= Modifiers::ALT,
+                _ => {}
+            }
+        }
+        
+        modifiers
+    }
+    
+    pub fn get_key_code(&self) -> global_hotkey::hotkey::Code {
+        use global_hotkey::hotkey::Code;
+        
+        let parts: Vec<&str> = self.hotkey.split('+').collect();
+        let key = parts.last().unwrap_or(&"A").trim();
+        
+        match key {
+            "A" => Code::KeyA,
+            "B" => Code::KeyB,
+            "C" => Code::KeyC,
+            "D" => Code::KeyD,
+            "E" => Code::KeyE,
+            "F" => Code::KeyF,
+            "G" => Code::KeyG,
+            "H" => Code::KeyH,
+            "I" => Code::KeyI,
+            "J" => Code::KeyJ,
+            "K" => Code::KeyK,
+            "L" => Code::KeyL,
+            "M" => Code::KeyM,
+            "N" => Code::KeyN,
+            "O" => Code::KeyO,
+            "P" => Code::KeyP,
+            "Q" => Code::KeyQ,
+            "R" => Code::KeyR,
+            "S" => Code::KeyS,
+            "T" => Code::KeyT,
+            "U" => Code::KeyU,
+            "V" => Code::KeyV,
+            "W" => Code::KeyW,
+            "X" => Code::KeyX,
+            "Y" => Code::KeyY,
+            "Z" => Code::KeyZ,
+            _ => Code::KeyA, // default fallback
+        }
     }
 }
