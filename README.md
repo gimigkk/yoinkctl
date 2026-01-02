@@ -1,111 +1,242 @@
-# yoinkctl - Blazing fast color picker
+# yoinkctl 🎨
 
-A fast, friendly color picker for Linux with global hotkey support.
+**yoinkctl** is a fast, minimal, global-hotkey color picker for Linux written in **Rust** using **egui**.
+Press a hotkey, click anywhere on your screen, and the color under your cursor is instantly copied to your clipboard.
 
-## Features
+Designed to be:
 
-- 🎯 **Global Hotkey**: Press `Meta+Shift+A` anywhere to pick colors
-- �� **Magnifying Glass**: 11x11 pixel zoom for precise color selection
-- ⚡ **Instant Copy**: Colors automatically copied to clipboard
-- 🚀 **Built-in Daemon**: No configuration needed
-- 💻 **Cross-platform**: Works on X11 and Wayland
-- 🎨 **Clean UI**: Transparent overlay with color info
+* 🚀 Fast & lightweight
+* 🎯 Precise (pixel-level picking with magnifier)
+* 🧠 Always available (background hotkey daemon)
+* 🖥️ Multi-monitor aware
 
-## Installation
+---
 
-### Prerequisites
+## ✨ Features
 
-**Fedora:**
-```bash
-sudo dnf install rust cargo wmctrl
-```
+* **Global hotkey color picking**
+* **Background daemon** (runs silently)
+* **Fullscreen transparent picker**
+* **Smooth magnifier with crosshair**
+* **Clipboard copy (HEX)**
+* **Display formats**
 
-**Arch:**
-```bash
-sudo pacman -S rust wmctrl
-```
+  * HEX
+  * RGB
+  * HSL
+* **Configurable**
 
-**Ubuntu/Debian:**
-```bash
-sudo apt install cargo wmctrl
-```
+  * Hotkey
+  * Preview size
+  * Visible color formats
+* **GUI config app**
+* **Debounced hotkey spawning**
+* **Single-instance picker lock**
 
-### Install
-```bash
-./install.sh
-```
+---
 
-The installer will:
-- Build the application
-- Install to `~/.local/bin`
-- Start the hotkey daemon
-- Configure autostart on login
+## 📸 How It Works
 
-## Usage
+1. Start the **daemon**
+2. Press your configured hotkey
+3. Screen freezes with a magnifier
+4. Click anywhere → color copied
+5. Picker exits instantly
 
-### Quick Start
+---
 
-Press **Meta+Shift+A** (Windows/Super + Shift + A) to launch the color picker!
+## 🧠 Architecture Overview
 
-### Manual Commands
-```bash
-# Open settings GUI
+```text
 yoinkctl
+├── Config GUI        (default launch)
+├── Hotkey Daemon     (yoinkctl daemon)
+└── Picker Overlay    (yoinkctl pick)
+```
 
-# Launch color picker manually
+### Modes
+
+| Command           | Purpose                      |
+| ----------------- | ---------------------------- |
+| `yoinkctl`        | Open settings GUI            |
+| `yoinkctl daemon` | Run background hotkey daemon |
+| `yoinkctl pick`   | Launch picker overlay        |
+
+---
+
+## 🛠️ Installation
+
+### Requirements
+
+* Linux (tested)
+* Rust 1.70+
+* X11 / Wayland compatible compositor
+
+### Build from source
+
+```bash
+git clone https://github.com/yourusername/yoinkctl.git
+cd yoinkctl
+cargo build --release
+```
+
+Binary will be located at:
+
+```text
+target/release/yoinkctl
+```
+
+(Optional)
+
+```bash
+sudo cp target/release/yoinkctl /usr/local/bin/
+```
+
+---
+
+## 🚀 Usage
+
+### 1️⃣ Launch Config GUI
+
+```bash
+yoinkctl
+```
+
+From here you can:
+
+* Start / stop the daemon
+* Change hotkey
+* Toggle color formats
+* Adjust magnifier size
+
+---
+
+### 2️⃣ Start the Daemon
+
+```bash
+yoinkctl daemon
+```
+
+This registers the global hotkey and runs in the background.
+
+---
+
+### 3️⃣ Pick a Color
+
+Press your configured hotkey (default):
+
+```
+Super + Shift + A
+```
+
+Click anywhere → color is copied to clipboard.
+
+---
+
+## ⌨️ Default Hotkey
+
+```
+Super + Shift + A
+```
+
+Supports:
+
+* Super
+* Shift
+* Ctrl
+* Alt
+* A–Z keys
+
+> ⚠️ Restart the daemon after changing hotkeys.
+
+---
+
+## ⚙️ Configuration
+
+Config file location:
+
+```text
+~/.config/yoinkctl/config.json
+```
+
+Example:
+
+```json
+{
+  "hotkey": "Super+Shift+A",
+  "show_hex": true,
+  "show_rgb": true,
+  "show_hsl": true,
+  "preview_size": 120
+}
+```
+
+---
+
+## 🧪 Manual Picker Launch (Debug)
+
+```bash
 yoinkctl pick
-
-# Start the hotkey daemon
-yoinkctl daemon
 ```
 
-### Development
-```bash
-# Run the daemon in development
-cargo run -- daemon
+Useful for testing without the daemon.
 
-# Test the picker
-cargo run -- pick
+---
 
-# Open settings
-cargo run
-```
+## 🧩 Tech Stack
 
-## How It Works
+* **Rust**
+* **egui / eframe** — UI
+* **xcap** — Screen capture
+* **arboard** — Clipboard
+* **global-hotkey** — System hotkeys
+* **serde / serde_json** — Config
 
-1. Press `Meta+Shift+A` anywhere
-2. Move your cursor over any color
-3. Click to pick and copy to clipboard
-4. Press `ESC` to cancel
+---
 
-Colors are copied in HEX format: `#RRGGBB`
+## 🐧 Platform Support
 
-## Troubleshooting
+| OS      | Status            |
+| ------- | ----------------- |
+| Linux   | ✅ Fully supported |
+| macOS   | ⚠️ Untested       |
+| Windows | ⚠️ Untested       |
 
-### Hotkey doesn't work after install
-Log out and log back in, or manually start the daemon:
-```bash
-yoinkctl daemon
-```
+> Daemon management (`pgrep`, `pkill`, `nohup`) is Linux-specific.
 
-### Multiple pickers launching
-Run the installer again to clean up old configurations:
-```bash
-./install.sh
-```
+---
 
-## Tech Stack
+## 🔒 Single Instance Guarantee
 
-- **Rust** - Fast, safe systems programming
-- **egui** - Immediate mode GUI
-- **global-hotkey** - Cross-platform hotkey registration
-- **xcap** - Screen capture
-- **arboard** - Clipboard handling
+* Picker uses a file lock in `/tmp`
+* Prevents double spawning
+* Cleans up safely on exit
 
-## License
+---
 
-MIT
+## 📄 License
 
-## Contributing
+MIT License
+Feel free to fork, modify, and distribute.
 
-Issues and pull requests welcome!
+---
+
+## 🤝 Contributing
+
+Pull requests welcome.
+
+Ideas:
+
+* Windows support
+* Wayland-specific optimizations
+* Palette history
+* Auto-copy RGB/HSL
+* Tray icon
+
+---
+
+## 🧠 Inspiration
+
+Built for developers, designers, and anyone tired of opening heavy apps just to copy a color.
+
+> *Click. Yoink. Done.*
