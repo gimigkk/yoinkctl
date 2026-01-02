@@ -1,4 +1,4 @@
-# yoinkctl 🎨
+# yoinkctl - Blazing fast color picker
 
 A fast, friendly color picker for Linux with global hotkey support.
 
