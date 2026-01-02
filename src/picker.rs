@@ -9,26 +9,35 @@ pub struct ColorPicker {
     screenshot: Option<RgbaImage>,
     screenshot_offset: (i32, i32),
     cursor_pos: egui::Pos2,
-    magnifier_pos: egui::Pos2, // Smoothed position for magnifier
-    magnifier_offset: egui::Vec2, // Smoothed offset for magnifier positioning
+    magnifier_pos: egui::Pos2,
+    magnifier_offset: egui::Vec2,
     should_close: bool,
     made_sticky: bool,
     config: Config,
+    initialized: bool,  // NEW: track if we've gotten first real cursor position
 }
 
 impl ColorPicker {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let (screenshot, offset) = capture_all_screens();
         
+        eprintln!("🎨 ColorPicker created");
+        eprintln!("   Screenshot captured: {}", screenshot.is_some());
+        if let Some(ref img) = screenshot {
+            eprintln!("   Screenshot size: {}x{}", img.width(), img.height());
+        }
+        eprintln!("   Screenshot offset: {:?}", offset);
+        
         Self {
             screenshot,
             screenshot_offset: offset,
             cursor_pos: egui::Pos2::ZERO,
-            magnifier_pos: egui::Pos2::ZERO, // Start at same position
-            magnifier_offset: egui::vec2(30.0, 30.0), // Start with default offset
+            magnifier_pos: egui::Pos2::ZERO,
+            magnifier_offset: egui::vec2(30.0, 30.0),
             should_close: false,
             made_sticky: false,
             config: Config::load().unwrap_or_default(),
+            initialized: false,
         }
     }
     
@@ -43,7 +52,7 @@ impl ColorPicker {
                 let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
                 
                 if session_type == "wayland" {
-                    println!("Detected Wayland, using KWin DBus scripting...");
+                    eprintln!("Detected Wayland, using KWin DBus scripting...");
                     
                     // Proper KWin script based on official API docs
                     let script = r#"
@@ -73,7 +82,7 @@ for (var i = 0; i < clients.length; i++) {
                         .output();
                     
                     if result.is_ok() {
-                        println!("✓ Script loaded via qdbus6");
+                        eprintln!("✓ Script loaded via qdbus6");
                         
                         // Run the script
                         if let Ok(out) = result {
@@ -88,7 +97,7 @@ for (var i = 0; i < clients.length; i++) {
                                         ])
                                         .output()
                                         .ok();
-                                    println!("✓ Script executed");
+                                    eprintln!("✓ Script executed");
                                 }
                             }
                         }
@@ -104,7 +113,7 @@ for (var i = 0; i < clients.length; i++) {
                             .output();
                         
                         if let Ok(out) = result {
-                            println!("✓ Script loaded via qdbus");
+                            eprintln!("✓ Script loaded via qdbus");
                             if let Ok(script_id) = String::from_utf8(out.stdout) {
                                 let script_id = script_id.trim();
                                 if !script_id.is_empty() {
@@ -116,7 +125,7 @@ for (var i = 0; i < clients.length; i++) {
                                         ])
                                         .output()
                                         .ok();
-                                    println!("✓ Script executed");
+                                    eprintln!("✓ Script executed");
                                 }
                             }
                         }
@@ -127,7 +136,7 @@ for (var i = 0; i < clients.length; i++) {
                     
                 } else {
                     // X11 path
-                    println!("Detected X11, using wmctrl...");
+                    eprintln!("Detected X11, using wmctrl...");
                     std::thread::sleep(std::time::Duration::from_millis(300));
                     
                     Command::new("wmctrl")
@@ -155,7 +164,7 @@ for (var i = 0; i < clients.length; i++) {
                         }
                     }
                     
-                    println!("✓ Attempted to make window sticky via wmctrl");
+                    eprintln!("✓ Attempted to make window sticky via wmctrl");
                 }
             });
         }
@@ -169,11 +178,20 @@ for (var i = 0; i < clients.length; i++) {
         let x = (self.cursor_pos.x as i32 + self.screenshot_offset.0).max(0) as u32;
         let y = (self.cursor_pos.y as i32 + self.screenshot_offset.1).max(0) as u32;
         
+        eprintln!("🔍 Get color at cursor:");
+        eprintln!("   Cursor pos: {:?}", self.cursor_pos);
+        eprintln!("   Screenshot offset: {:?}", self.screenshot_offset);
+        eprintln!("   Calculated x: {}, y: {}", x, y);
+        eprintln!("   Screenshot size: {}x{}", screenshot.width(), screenshot.height());
+        
         if x >= screenshot.width() || y >= screenshot.height() {
+            eprintln!("   ❌ OUT OF BOUNDS!");
             return None;
         }
         
         let pixel = screenshot.get_pixel(x, y);
+        eprintln!("   ✅ Color found: RGB({}, {}, {})", pixel[0], pixel[1], pixel[2]);
+        
         Some(egui::Color32::from_rgba_premultiplied(
             pixel[0], pixel[1], pixel[2], 255
         ))
@@ -186,39 +204,31 @@ for (var i = 0; i < clients.length; i++) {
             if let Err(e) = clipboard.set_text(&hex) {
                 eprintln!("Failed to copy to clipboard: {}", e);
             } else {
-                println!("Copied to clipboard: {}", hex);
+                eprintln!("✅ Copied to clipboard: {}", hex);
             }
         }
     }
     
-    // Calculate target offset for magnifier to keep it on screen
     fn calculate_magnifier_offset(&self, mag_size: f32, info_height: f32, screen_rect: egui::Rect) -> egui::Vec2 {
-        let margin = 30.0; // X and Y offset when cursor goes down/right
-        let small_margin = 10.0; // Y offset when cursor goes up (reduced margin for top positioning)
-        let total_height = mag_size + info_height + 10.0; // mag + gap + info box
+        let margin = 30.0;
+        let small_margin = 10.0;
+        let total_height = mag_size + info_height + 10.0;
         
-        // Default offset (bottom-right of cursor)
         let mut offset_x = margin;
         let mut offset_y = margin;
         
-        // Check right edge (use magnifier_pos for calculations)
         if self.magnifier_pos.x + margin + mag_size > screen_rect.max.x {
-            // Move to left side of cursor
             offset_x = -(mag_size + margin);
         }
         
-        // Check bottom edge
         if self.magnifier_pos.y + margin + total_height > screen_rect.max.y {
-            // Move to top side of cursor with smaller margin
             offset_y = -(mag_size + small_margin);
         }
         
-        // Check top edge (when moved up)
         if self.magnifier_pos.y + offset_y < screen_rect.min.y {
             offset_y = -self.magnifier_pos.y + small_margin + screen_rect.min.y;
         }
         
-        // Check left edge (when moved left)
         if self.magnifier_pos.x + offset_x < screen_rect.min.x {
             offset_x = -self.magnifier_pos.x + margin + screen_rect.min.x;
         }
@@ -232,8 +242,8 @@ impl eframe::App for ColorPicker {
         egui::Rgba::TRANSPARENT.to_array()
     }
     
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Make window sticky after first frame (window needs to exist first)
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Make window sticky after first frame
         if !self.made_sticky {
             self.make_window_sticky();
         }
@@ -249,70 +259,84 @@ impl eframe::App for ColorPicker {
         
         // Get current cursor position
         if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
+            if !self.initialized {
+                eprintln!("🎯 First cursor position received: {:?}", pos);
+                self.initialized = true;
+            }
             self.cursor_pos = pos;
+        } else {
+            if let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) {
+                if !self.initialized {
+                    eprintln!("🎯 Using latest_pos instead: {:?}", pos);
+                    self.initialized = true;
+                }
+                self.cursor_pos = pos;
+            } else {
+                eprintln!("⚠️  No cursor position available!");
+            }
         }
         
-        // Smooth magnifier following with easing and distance clamping
-        let max_distance = 150.0; // Maximum distance magnifier can be from cursor
-        let smoothing = 0.15; // Lower = smoother but slower, higher = faster but less smooth
+        // Smooth magnifier following
+        let max_distance = 150.0;
+        let smoothing = 0.15;
         
         let target_pos = self.cursor_pos;
         let current_distance = self.magnifier_pos.distance(target_pos);
         
-        // If distance is too large, snap closer
         if current_distance > max_distance {
             let direction = (target_pos - self.magnifier_pos) / current_distance;
             self.magnifier_pos = target_pos - direction * max_distance;
         }
         
-        // Smooth interpolation (lerp with easing)
         self.magnifier_pos.x += (target_pos.x - self.magnifier_pos.x) * smoothing;
         self.magnifier_pos.y += (target_pos.y - self.magnifier_pos.y) * smoothing;
         
         // Check for escape key
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            eprintln!("🚪 Escape pressed, closing...");
             self.should_close = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
         
-        // Check for mouse click
+        // Check for mouse click - FIXED: Use frame.close() instead of std::process::exit()
         if ctx.input(|i| i.pointer.primary_clicked()) {
+            eprintln!("🖱️  CLICK DETECTED!");
             if let Some(color) = self.get_color_at_cursor() {
+                eprintln!("🎨 COLOR FOUND: {:?}", color);
                 self.copy_to_clipboard(color);
+                
+                // Use proper cleanup instead of exit
                 self.should_close = true;
-                // Close immediately and exit the process
-                std::process::exit(0);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            } else {
+                eprintln!("❌ get_color_at_cursor returned None!");
             }
         }
         
-        // Draw fullscreen overlay with NO background
+        // Draw fullscreen overlay
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(egui::Color32::TRANSPARENT))
             .show(ctx, |ui| {
-                // Get the actual screen rect from the UI
                 let screen_rect = ui.max_rect();
                 
                 // Draw magnifying glass and info
                 if let Some(color) = self.get_color_at_cursor() {
                     let mag_size = self.config.preview_size as f32;
                     
-                    // Calculate info height based on what's shown
                     let mut line_count = 0;
                     if self.config.show_hex { line_count += 1; }
                     if self.config.show_rgb { line_count += 1; }
                     if self.config.show_hsl { line_count += 1; }
                     let info_height = if line_count > 0 { 15.0 + (line_count as f32 * 20.0) } else { 0.0 };
                     
-                    // Calculate target offset based on screen position
                     let target_offset = self.calculate_magnifier_offset(mag_size, info_height, screen_rect);
                     
-                    // Smooth offset interpolation (faster than position for snappier feel)
                     let offset_smoothing = 0.25;
                     self.magnifier_offset.x += (target_offset.x - self.magnifier_offset.x) * offset_smoothing;
                     self.magnifier_offset.y += (target_offset.y - self.magnifier_offset.y) * offset_smoothing;
                     
-                    // Apply smoothed offset to magnifier position
                     let mag_pos = self.magnifier_pos + self.magnifier_offset;
                     
                     // Draw zoomed pixels (11x11 grid)
@@ -341,7 +365,6 @@ impl eframe::App for ColorPicker {
                                     
                                     ui.painter().rect_filled(cell_rect, 0.0, pixel_color);
                                     
-                                    // Highlight center pixel
                                     if dx == 0 && dy == 0 {
                                         ui.painter().rect_stroke(
                                             cell_rect,
@@ -362,17 +385,14 @@ impl eframe::App for ColorPicker {
                         egui::Stroke::new(3.0, egui::Color32::WHITE),
                     );
                     
-                    // Text info below magnifier (adjust position based on where magnifier is)
+                    // Text info below magnifier
                     if info_height > 0.0 {
                         let info_y = if self.magnifier_offset.y < 0.0 {
-                            // Magnifier is above cursor, put info above magnifier
                             mag_pos.y - info_height - 10.0
                         } else {
-                            // Magnifier is below cursor, put info below magnifier
                             mag_pos.y + mag_size + 10.0
                         };
                         
-                        // Calculate maximum text width
                         let mut max_text_width = 0.0f32;
                         let padding = 16.0;
                         
@@ -397,7 +417,6 @@ impl eframe::App for ColorPicker {
                         }
                         
                         if self.config.show_hsl {
-                            // Convert RGB to HSL for measurement
                             let r = color.r() as f32 / 255.0;
                             let g = color.g() as f32 / 255.0;
                             let b = color.b() as f32 / 255.0;
@@ -475,7 +494,6 @@ impl eframe::App for ColorPicker {
                         }
                         
                         if self.config.show_hsl {
-                            // Convert RGB to HSL
                             let r = color.r() as f32 / 255.0;
                             let g = color.g() as f32 / 255.0;
                             let b = color.b() as f32 / 255.0;
@@ -533,22 +551,32 @@ impl eframe::App for ColorPicker {
                 );
             });
         
-        // Request repaint for smooth cursor tracking
         ctx.request_repaint();
     }
 }
 
 fn capture_all_screens() -> (Option<RgbaImage>, (i32, i32)) {
-    // Try to capture the primary monitor
+    eprintln!("📸 Capturing screen...");
+    
     if let Ok(monitors) = Monitor::all() {
+        eprintln!("   Found {} monitor(s)", monitors.len());
+        
         if let Some(monitor) = monitors.first() {
+            eprintln!("   Using monitor: {}x{} at ({}, {})", 
+                monitor.width(), monitor.height(), monitor.x(), monitor.y());
+            
             if let Ok(image) = monitor.capture_image() {
-                // Get the monitor position offset
                 let x_offset = monitor.x();
                 let y_offset = monitor.y();
+                eprintln!("   ✅ Screenshot captured successfully");
                 return (Some(image), (x_offset, y_offset));
+            } else {
+                eprintln!("   ❌ Failed to capture image");
             }
         }
+    } else {
+        eprintln!("   ❌ Failed to get monitors");
     }
+    
     (None, (0, 0))
 }

@@ -1,174 +1,289 @@
 #!/bin/bash
 
-# yoinkctl installer - MAXIMUM user friendliness!
+# yoinkctl Universal Installer
+# Works with or without pre-built binary
 
 set -e
 
-# Get the directory where the script is located
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-cd "$SCRIPT_DIR"
+REPO_URL="https://github.com/gimigkk/yoinkctl"
+VERSION="1.0.0"
+INSTALL_DIR="$HOME/.local/bin"
+CONFIG_DIR="$HOME/.config/yoinkctl"
 
-echo "🎨 Installing yoinkctl - The Friendly Color Picker!"
-echo ""
+# Color output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+BOLD='\033[1m'
+NC='\033[0m' # No Color
 
-# Check for wmctrl (needed for sticky windows)
-if ! command -v wmctrl &> /dev/null; then
-    echo "⚠️  wmctrl not found - needed for multi-workspace support"
+print_header() {
     echo ""
-    echo "Install it with:"
-    if command -v dnf &> /dev/null; then
-        echo "  sudo dnf install wmctrl"
-    elif command -v apt &> /dev/null; then
-        echo "  sudo apt install wmctrl"
-    elif command -v pacman &> /dev/null; then
-        echo "  sudo pacman -S wmctrl"
-    else
-        echo "  (search for wmctrl in your package manager)"
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BLUE}$1${NC}"
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+}
+
+print_success() {
+    echo -e "${GREEN}✓${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}✗${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}⚠${NC} $1"
+}
+
+print_info() {
+    echo -e "${BLUE}ℹ${NC} $1"
+}
+
+# Detect OS and architecture
+detect_system() {
+    OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+    ARCH=$(uname -m)
+    
+    case $ARCH in
+        x86_64|amd64)
+            ARCH="x86_64"
+            ;;
+        aarch64|arm64)
+            ARCH="aarch64"
+            ;;
+        *)
+            print_error "Unsupported architecture: $ARCH"
+            exit 1
+            ;;
+    esac
+    
+    print_info "Detected: $OS-$ARCH"
+}
+
+# Complete cleanup of old installations
+cleanup_old_installations() {
+    print_header "🧹 Cleaning Up Old Installations"
+    
+    # Stop all running instances
+    print_info "Stopping all yoinkctl processes..."
+    pkill -9 -f "yoinkctl" 2>/dev/null || true
+    sleep 1
+    
+    # Remove from common installation locations
+    local locations=(
+        "$HOME/.local/bin/yoinkctl"
+        "$HOME/bin/yoinkctl"
+        "/usr/local/bin/yoinkctl"
+        "$HOME/.cargo/bin/yoinkctl"
+    )
+    
+    for loc in "${locations[@]}"; do
+        if [ -f "$loc" ]; then
+            rm -f "$loc" 2>/dev/null || true
+            print_success "Removed $loc"
+        fi
+    done
+    
+    # Clear KDE shortcuts
+    if [ "$XDG_CURRENT_DESKTOP" = "KDE" ] || [ -n "$KDE_SESSION_VERSION" ]; then
+        print_info "Cleaning KDE shortcuts..."
+        
+        KWRITE=""
+        if command -v kwriteconfig6 &> /dev/null; then
+            KWRITE="kwriteconfig6"
+        elif command -v kwriteconfig5 &> /dev/null; then
+            KWRITE="kwriteconfig5"
+        fi
+        
+        if [ -n "$KWRITE" ]; then
+            $KWRITE --file kglobalshortcutsrc --group "yoinkctl-pick.desktop" --delete 2>/dev/null || true
+            
+            KHOTKEYS_RC="$HOME/.config/khotkeysrc"
+            if [ -f "$KHOTKEYS_RC" ]; then
+                cp "$KHOTKEYS_RC" "$KHOTKEYS_RC.backup-$(date +%s)" 2>/dev/null || true
+                sed -i '/yoinkctl/d' "$KHOTKEYS_RC" 2>/dev/null || true
+            fi
+            
+            # Reload KDE shortcuts
+            QDBUS=""
+            if command -v qdbus6 &> /dev/null; then
+                QDBUS="qdbus6"
+            elif command -v qdbus &> /dev/null; then
+                QDBUS="qdbus"
+            fi
+            
+            if [ -n "$QDBUS" ]; then
+                $QDBUS org.kde.kded6 /kded org.kde.kded6.unloadModule khotkeys 2>/dev/null || \
+                $QDBUS org.kde.kded5 /kded org.kde.kded5.unloadModule khotkeys 2>/dev/null || true
+                sleep 0.3
+                $QDBUS org.kde.kded6 /kded org.kde.kded6.loadModule khotkeys 2>/dev/null || \
+                $QDBUS org.kde.kded5 /kded org.kde.kded5.loadModule khotkeys 2>/dev/null || true
+            fi
+            
+            print_success "KDE shortcuts cleared"
+        fi
     fi
-    echo ""
-    read -p "Continue anyway? (y/n) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    
+    # Remove old desktop files
+    rm -f "$HOME/.local/share/applications/yoinkctl"*.desktop 2>/dev/null || true
+    
+    # Remove old autostart
+    rm -f "$HOME/.config/autostart/yoinkctl.desktop" 2>/dev/null || true
+    
+    # Clear xbindkeys config
+    if [ -f "$HOME/.xbindkeysrc" ]; then
+        sed -i '/# yoinkctl/,+2d' "$HOME/.xbindkeysrc" 2>/dev/null || true
+    fi
+    
+    print_success "Cleanup complete"
+}
+
+# Check and install dependencies
+check_dependencies() {
+    print_header "📦 Checking Dependencies"
+    
+    local missing_deps=()
+    
+    # Check for wmctrl (recommended but not required)
+    if ! command -v wmctrl &> /dev/null; then
+        print_warning "wmctrl not found (recommended for multi-workspace support)"
+        missing_deps+=("wmctrl")
+    fi
+    
+    # Check for qdbus/qdbus6 on KDE
+    if [ "$XDG_CURRENT_DESKTOP" = "KDE" ] || [ -n "$KDE_SESSION_VERSION" ]; then
+        if ! command -v qdbus6 &> /dev/null && ! command -v qdbus &> /dev/null; then
+            print_warning "qdbus not found (needed for KDE Wayland support)"
+            missing_deps+=("qdbus" "or" "qdbus6")
+        fi
+    fi
+    
+    if [ ${#missing_deps[@]} -gt 0 ]; then
+        echo ""
+        print_info "Optional dependencies: ${missing_deps[*]}"
+        print_info "Install commands:"
+        
+        if command -v apt &> /dev/null; then
+            echo "  sudo apt install wmctrl qdbus-qt5"
+        elif command -v dnf &> /dev/null; then
+            echo "  sudo dnf install wmctrl qt5-qttools"
+        elif command -v pacman &> /dev/null; then
+            echo "  sudo pacman -S wmctrl qt5-tools"
+        fi
+        
+        echo ""
+        read -p "Continue without optional dependencies? [Y/n] " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Nn]$ ]]; then
+            exit 1
+        fi
+    else
+        print_success "All dependencies found"
+    fi
+}
+
+# Download pre-built binary
+download_binary() {
+    print_header "⬇️  Downloading yoinkctl"
+    
+    local binary_url="${REPO_URL}/releases/download/v${VERSION}/yoinkctl-${OS}-${ARCH}"
+    local temp_file="/tmp/yoinkctl-download"
+    
+    print_info "Downloading from: $binary_url"
+    
+    if command -v curl &> /dev/null; then
+        if curl -L -f -o "$temp_file" "$binary_url" 2>/dev/null; then
+            print_success "Download complete"
+            echo "$temp_file"
+            return 0
+        fi
+    elif command -v wget &> /dev/null; then
+        if wget -q -O "$temp_file" "$binary_url" 2>/dev/null; then
+            print_success "Download complete"
+            echo "$temp_file"
+            return 0
+        fi
+    fi
+    
+    print_warning "Could not download pre-built binary"
+    return 1
+}
+
+# Build from source
+build_from_source() {
+    print_header "🔨 Building from Source"
+    
+    if ! command -v cargo &> /dev/null; then
+        print_error "Rust/Cargo not found!"
+        print_info "Install Rust: https://rustup.rs/"
+        print_info "Or download a pre-built release from: $REPO_URL/releases"
         exit 1
     fi
-fi
-
-# Build release version
-echo "⚙️  Building yoinkctl..."
-cargo build --release 2>&1 | grep -v "warning:" || true
-
-# Stop any running instances before installing
-echo "🛑 Stopping any running instances..."
-pkill -f "yoinkctl" 2>/dev/null || true
-sleep 1
-
-# Install binary to user's local bin
-INSTALL_DIR="$HOME/.local/bin"
-mkdir -p "$INSTALL_DIR"
-cp "$SCRIPT_DIR/target/release/yoinkctl" "$INSTALL_DIR/"
-chmod +x "$INSTALL_DIR/yoinkctl"
-
-echo "✅ Binary installed to $INSTALL_DIR/yoinkctl"
-
-# Check if ~/.local/bin is in PATH
-if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
-    echo ""
-    echo "📝 Adding $INSTALL_DIR to PATH..."
     
-    # Detect shell and add to appropriate rc file
-    if [ -n "$BASH_VERSION" ]; then
-        SHELL_RC="$HOME/.bashrc"
-    elif [ -n "$ZSH_VERSION" ]; then
-        SHELL_RC="$HOME/.zshrc"
+    local script_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+    
+    print_info "Building release version..."
+    cd "$script_dir"
+    
+    if cargo build --release 2>&1 | grep -v "warning:" | grep -v "Compiling" | grep -v "Finished"; then
+        print_success "Build complete"
+        echo "$script_dir/target/release/yoinkctl"
+        return 0
     else
-        SHELL_RC="$HOME/.profile"
+        print_error "Build failed"
+        return 1
     fi
-    
-    if ! grep -q ".local/bin" "$SHELL_RC" 2>/dev/null; then
-        echo "" >> "$SHELL_RC"
-        echo "# Added by yoinkctl installer" >> "$SHELL_RC"
-        echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$SHELL_RC"
-        echo "✅ Added to $SHELL_RC"
-    fi
-    
-    # Also export for current session
-    export PATH="$HOME/.local/bin:$PATH"
-fi
+}
 
-echo ""
-echo "🧹 Cleaning up old configurations..."
-
-# Remove old KDE shortcuts to prevent conflicts
-if [ "$XDG_CURRENT_DESKTOP" = "KDE" ] || [ -n "$KDE_SESSION_VERSION" ]; then
-    echo "   Removing old KDE hotkey configurations..."
+# Install binary
+install_binary() {
+    local binary_path="$1"
     
-    # Find kwriteconfig
-    KWRITE=""
-    if command -v kwriteconfig6 &> /dev/null; then
-        KWRITE="kwriteconfig6"
-    elif command -v kwriteconfig5 &> /dev/null; then
-        KWRITE="kwriteconfig5"
-    elif command -v kwriteconfig &> /dev/null; then
-        KWRITE="kwriteconfig"
-    fi
+    print_header "📥 Installing yoinkctl"
     
-    if [ -n "$KWRITE" ]; then
-        # Remove from kglobalshortcutsrc
-        $KWRITE --file kglobalshortcutsrc --group "yoinkctl-pick.desktop" --delete 2>/dev/null || true
+    mkdir -p "$INSTALL_DIR"
+    mkdir -p "$CONFIG_DIR"
+    
+    cp "$binary_path" "$INSTALL_DIR/yoinkctl"
+    chmod +x "$INSTALL_DIR/yoinkctl"
+    
+    print_success "Installed to: $INSTALL_DIR/yoinkctl"
+    
+    # Ensure ~/.local/bin is in PATH
+    if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+        print_info "Adding $INSTALL_DIR to PATH..."
         
-        # Remove all yoinkctl entries from khotkeysrc
-        KHOTKEYS_RC="$HOME/.config/khotkeysrc"
-        if [ -f "$KHOTKEYS_RC" ]; then
-            # Create a backup
-            cp "$KHOTKEYS_RC" "$KHOTKEYS_RC.backup-$(date +%s)"
-            
-            # Remove yoinkctl sections using sed
-            sed -i '/\[Data_[0-9]*\]/,/^$/{ /yoinkctl/,/^$/d; }' "$KHOTKEYS_RC" 2>/dev/null || true
-            sed -i '/yoinkctl/d' "$KHOTKEYS_RC" 2>/dev/null || true
+        local shell_rc=""
+        if [ -n "$BASH_VERSION" ]; then
+            shell_rc="$HOME/.bashrc"
+        elif [ -n "$ZSH_VERSION" ]; then
+            shell_rc="$HOME/.zshrc"
+        else
+            shell_rc="$HOME/.profile"
         fi
         
-        echo "   ✓ Removed old KDE shortcuts"
-        
-        # Reload KDE shortcuts
-        QDBUS_CMD=""
-        if command -v qdbus6 &> /dev/null; then
-            QDBUS_CMD="qdbus6"
-        elif command -v qdbus &> /dev/null; then
-            QDBUS_CMD="qdbus"
+        if ! grep -q ".local/bin" "$shell_rc" 2>/dev/null; then
+            echo "" >> "$shell_rc"
+            echo "# Added by yoinkctl installer" >> "$shell_rc"
+            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$shell_rc"
+            print_success "Added to $shell_rc"
         fi
         
-        if [ -n "$QDBUS_CMD" ]; then
-            # Unload and reload khotkeys to clear old shortcuts
-            $QDBUS_CMD org.kde.kded6 /kded org.kde.kded6.unloadModule khotkeys 2>/dev/null || \
-            $QDBUS_CMD org.kde.kded5 /kded org.kde.kded5.unloadModule khotkeys 2>/dev/null || true
-            
-            sleep 0.5
-            
-            $QDBUS_CMD org.kde.kded6 /kded org.kde.kded6.loadModule khotkeys 2>/dev/null || \
-            $QDBUS_CMD org.kde.kded5 /kded org.kde.kded5.loadModule khotkeys 2>/dev/null || true
-            
-            echo "   ✓ Reloaded KDE shortcuts service"
-        fi
+        export PATH="$HOME/.local/bin:$PATH"
     fi
-fi
+}
 
-# Remove old desktop file
-rm -f "$HOME/.local/share/applications/yoinkctl-pick.desktop" 2>/dev/null || true
-
-# Remove old xbindkeys config if it exists
-if [ -f "$HOME/.xbindkeysrc" ]; then
-    sed -i '/# yoinkctl/,+2d' "$HOME/.xbindkeysrc" 2>/dev/null || true
-fi
-
-echo "✅ Old configurations cleaned"
-
-echo ""
-echo "🚀 Starting hotkey daemon..."
-
-# Kill any existing daemon
-pkill -f "yoinkctl daemon" 2>/dev/null || true
-sleep 0.5
-
-# Start the daemon in the background
-nohup "$INSTALL_DIR/yoinkctl" daemon >/dev/null 2>&1 &
-DAEMON_PID=$!
-
-sleep 1
-
-# Check if daemon is running
-if kill -0 $DAEMON_PID 2>/dev/null; then
-    echo "✅ Daemon started successfully (PID: $DAEMON_PID)"
-else
-    echo "⚠️  Daemon failed to start, trying again..."
-    "$INSTALL_DIR/yoinkctl" daemon &
-    sleep 1
-fi
-
-# Create autostart entry so daemon starts on login
-AUTOSTART_DIR="$HOME/.config/autostart"
-mkdir -p "$AUTOSTART_DIR"
-
-cat > "$AUTOSTART_DIR/yoinkctl.desktop" << EOF
+# Setup autostart
+setup_autostart() {
+    print_header "🚀 Setting Up Autostart"
+    
+    local autostart_dir="$HOME/.config/autostart"
+    mkdir -p "$autostart_dir"
+    
+    cat > "$autostart_dir/yoinkctl.desktop" << EOF
 [Desktop Entry]
 Type=Application
 Name=yoinkctl Hotkey Daemon
@@ -178,31 +293,80 @@ Icon=color-picker
 Terminal=false
 Categories=Utility;
 X-GNOME-Autostart-enabled=true
+Hidden=false
 EOF
+    
+    print_success "Autostart configured"
+}
 
-echo "✅ Autostart configured (will start on next login)"
+# Start daemon
+start_daemon() {
+    print_header "▶️  Starting Daemon"
+    
+    # Kill any existing daemon
+    pkill -f "yoinkctl daemon" 2>/dev/null || true
+    sleep 0.5
+    
+    # Start new daemon
+    nohup "$INSTALL_DIR/yoinkctl" daemon > /tmp/yoinkctl-daemon.log 2>&1 &
+    local daemon_pid=$!
+    
+    sleep 1
+    
+    if kill -0 $daemon_pid 2>/dev/null; then
+        print_success "Daemon started (PID: $daemon_pid)"
+        return 0
+    else
+        print_warning "Daemon may have failed to start"
+        print_info "Check logs: /tmp/yoinkctl-daemon.log"
+        return 1
+    fi
+}
 
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-echo "  ✨ Installation Complete! ✨"
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-echo "  🎯 Your hotkey is ready: Meta+Shift+A"
-echo ""
-echo "  Try it RIGHT NOW! Press Meta+Shift+A"
-echo "  (Meta is usually the Windows/Super key)"
-echo ""
-echo "  ⚠️  If you see TWO pickers, please log out"
-echo "      and log back in to clear old shortcuts"
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-echo "Other commands:"
-echo "  • yoinkctl          → Open settings GUI"
-echo "  • yoinkctl pick     → Launch picker manually"
-echo "  • yoinkctl daemon   → Start hotkey daemon"
-echo ""
-echo "The daemon will auto-start when you log in!"
-echo ""
+# Main installation flow
+main() {
+    print_header "🎨 yoinkctl Installer v${VERSION}"
+    
+    detect_system
+    cleanup_old_installations
+    check_dependencies
+    
+    # Try to download pre-built binary first
+    local binary_path=""
+    
+    if binary_path=$(download_binary); then
+        print_success "Using pre-built binary"
+    else
+        print_info "Falling back to building from source..."
+        if binary_path=$(build_from_source); then
+            print_success "Built from source"
+        else
+            print_error "Installation failed"
+            exit 1
+        fi
+    fi
+    
+    install_binary "$binary_path"
+    setup_autostart
+    start_daemon
+    
+    # Final success message
+    print_header "✨ Installation Complete!"
+    
+    echo -e "${GREEN}${BOLD}"
+    echo "  🎯 Hotkey: Meta+Shift+A"
+    echo "     (Meta = Windows/Super key)"
+    echo -e "${NC}"
+    echo -e "${BLUE}Commands:${NC}"
+    echo "  • yoinkctl          → Open settings GUI"
+    echo "  • yoinkctl pick     → Manual color picker"
+    echo "  • yoinkctl daemon   → Start daemon"
+    echo ""
+    echo -e "${YELLOW}⚠️  If the hotkey doesn't work immediately,${NC}"
+    echo -e "${YELLOW}   please log out and log back in.${NC}"
+    echo ""
+    print_info "Try your hotkey now: Meta+Shift+A"
+    echo ""
+}
+
+main "$@"

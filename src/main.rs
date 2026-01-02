@@ -52,24 +52,90 @@ fn run_daemon() -> Result<(), eframe::Error> {
     loop {
         if let Ok(_event) = receiver.recv() {
             let now = std::time::Instant::now();
-            if now.duration_since(last_activation).as_millis() < 500 {
+            // Reduced from 500ms to 200ms for faster response
+            if now.duration_since(last_activation).as_millis() < 200 {
                 continue;
             }
             last_activation = now;
             
             #[cfg(target_os = "linux")]
             {
-                Command::new("sh")
-                    .arg("-c")
-                    .arg(format!("export DESKTOP_STARTUP_ID=; {} pick", exe_path.display()))
-                    .env_clear()
-                    .env("PATH", std::env::var("PATH").unwrap_or_default())
-                    .env("HOME", std::env::var("HOME").unwrap_or_default())
-                    .env("DISPLAY", std::env::var("DISPLAY").unwrap_or_default())
-                    .env("WAYLAND_DISPLAY", std::env::var("WAYLAND_DISPLAY").unwrap_or_default())
-                    .env("XDG_RUNTIME_DIR", std::env::var("XDG_RUNTIME_DIR").unwrap_or_default())
-                    .spawn()
-                    .ok();
+                // Collect ALL current environment variables that might be needed
+                let mut cmd = Command::new(&exe_path);
+                cmd.arg("pick");
+                
+                // Core environment variables
+                if let Ok(val) = std::env::var("PATH") {
+                    cmd.env("PATH", val);
+                }
+                if let Ok(val) = std::env::var("HOME") {
+                    cmd.env("HOME", val);
+                }
+                
+                // Display server variables
+                if let Ok(val) = std::env::var("DISPLAY") {
+                    cmd.env("DISPLAY", val);
+                }
+                if let Ok(val) = std::env::var("WAYLAND_DISPLAY") {
+                    cmd.env("WAYLAND_DISPLAY", val);
+                }
+                
+                // XDG variables (critical for Wayland)
+                if let Ok(val) = std::env::var("XDG_RUNTIME_DIR") {
+                    cmd.env("XDG_RUNTIME_DIR", val);
+                }
+                if let Ok(val) = std::env::var("XDG_SESSION_TYPE") {
+                    cmd.env("XDG_SESSION_TYPE", val);
+                }
+                if let Ok(val) = std::env::var("XDG_CURRENT_DESKTOP") {
+                    cmd.env("XDG_CURRENT_DESKTOP", val);
+                }
+                if let Ok(val) = std::env::var("XDG_SESSION_DESKTOP") {
+                    cmd.env("XDG_SESSION_DESKTOP", val);
+                }
+                
+                // DBus (important for desktop integration)
+                if let Ok(val) = std::env::var("DBUS_SESSION_BUS_ADDRESS") {
+                    cmd.env("DBUS_SESSION_BUS_ADDRESS", val);
+                }
+                
+                // X11 auth
+                if let Ok(val) = std::env::var("XAUTHORITY") {
+                    cmd.env("XAUTHORITY", val);
+                }
+                
+                // Wayland socket (critical!)
+                if let Ok(val) = std::env::var("WAYLAND_SOCKET") {
+                    cmd.env("WAYLAND_SOCKET", val);
+                }
+                
+                // Qt/GTK theming (helps with consistent appearance)
+                if let Ok(val) = std::env::var("QT_QPA_PLATFORM") {
+                    cmd.env("QT_QPA_PLATFORM", val);
+                }
+                if let Ok(val) = std::env::var("GDK_BACKEND") {
+                    cmd.env("GDK_BACKEND", val);
+                }
+                
+                // User-specific variables that might be needed
+                if let Ok(val) = std::env::var("USER") {
+                    cmd.env("USER", val);
+                }
+                if let Ok(val) = std::env::var("LOGNAME") {
+                    cmd.env("LOGNAME", val);
+                }
+                
+                // CRITICAL: These prevent KDE's startup notification / bouncing icon
+                cmd.env("DESKTOP_STARTUP_ID", "");
+                cmd.env("GNOME_DESKTOP_STARTUP_ID", "");
+                
+                // Detach from parent process completely
+                cmd.stdin(std::process::Stdio::null());
+                cmd.stdout(std::process::Stdio::null());
+                cmd.stderr(std::process::Stdio::null());
+                
+                // Spawn the process
+                cmd.spawn().ok();
             }
             
             #[cfg(not(target_os = "linux"))]
@@ -87,23 +153,44 @@ fn run_daemon() -> Result<(), eframe::Error> {
 fn run_picker() -> Result<(), eframe::Error> {
     let lock_path = std::env::temp_dir().join("yoinkctl-picker.lock");
     
+    // Quick check if lock file exists and is valid
     if lock_path.exists() {
         if let Ok(pid_str) = std::fs::read_to_string(&lock_path) {
             if let Ok(pid) = pid_str.trim().parse::<i32>() {
                 #[cfg(target_os = "linux")]
                 {
+                    // Fast check: does /proc/PID exist?
                     if std::path::Path::new(&format!("/proc/{}", pid)).exists() {
+                        println!("Color picker already running (PID: {}), ignoring...", pid);
+                        return Ok(());
+                    }
+                }
+                
+                #[cfg(not(target_os = "linux"))]
+                {
+                    // On non-Linux, try to send signal 0 to check if process exists
+                    use std::process::Command;
+                    if Command::new("kill")
+                        .args(&["-0", &pid.to_string()])
+                        .output()
+                        .map(|o| o.status.success())
+                        .unwrap_or(false)
+                    {
                         println!("Color picker already running (PID: {}), ignoring...", pid);
                         return Ok(());
                     }
                 }
             }
         }
+        // If we got here, lock file is stale - remove it
+        std::fs::remove_file(&lock_path).ok();
     }
     
+    // Write our PID immediately
     let pid = std::process::id();
     std::fs::write(&lock_path, pid.to_string()).ok();
     
+    // Set environment for better Wayland compatibility
     std::env::set_var("QT_QPA_PLATFORMTHEME", "");
     std::env::set_var("QT_QPA_PLATFORM", "xcb");
     std::env::remove_var("DESKTOP_STARTUP_ID");
@@ -111,11 +198,6 @@ fn run_picker() -> Result<(), eframe::Error> {
     #[cfg(target_os = "linux")]
     {
         std::env::set_var("DESKTOP_STARTUP_ID", "");
-        Command::new("sh")
-            .arg("-c")
-            .arg("kill -CONT $ 2>/dev/null || true")
-            .output()
-            .ok();
     }
     
     let options = eframe::NativeOptions {
@@ -136,6 +218,7 @@ fn run_picker() -> Result<(), eframe::Error> {
         Box::new(|cc| Ok(Box::new(ColorPicker::new(cc)))),
     );
     
+    // Clean up lock file
     std::fs::remove_file(&lock_path).ok();
     result
 }
@@ -220,6 +303,7 @@ fn start_daemon() {
     {
         Command::new(&exe_path)
             .arg("daemon")
+            .env_remove("DESKTOP_STARTUP_ID")  // Only remove this one
             .spawn()
             .ok();
     }
@@ -377,6 +461,7 @@ impl eframe::App for ConfigApp {
                                                     {
                                                         Command::new(&exe_path)
                                                             .arg("pick")
+                                                            .env_remove("DESKTOP_STARTUP_ID")  // Only remove this one
                                                             .spawn()
                                                             .ok();
                                                     }
