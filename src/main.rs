@@ -1,7 +1,7 @@
 use eframe::egui;
 use std::env;
 use std::process::Command;
-use global_hotkey::{GlobalHotKeyManager, hotkey::{HotKey, Modifiers, Code}};
+use global_hotkey::{GlobalHotKeyManager, hotkey::HotKey};
 
 mod picker;
 mod config;
@@ -15,190 +15,152 @@ fn main() -> Result<(), eframe::Error> {
     if args.len() > 1 {
         match args[1].as_str() {
             "pick" => {
-                println!("Launching color picker...");
                 return run_picker();
             }
             "daemon" => {
-                println!("Starting yoinkctl hotkey daemon...");
-                return run_daemon();
+                if let Err(e) = run_daemon() {
+                    eprintln!("Daemon error: {}", e);
+                }
+                return Ok(());
             }
             _ => {}
         }
     }
     
-    println!("Launching config GUI...");
     run_config_gui()
 }
 
-fn run_daemon() -> Result<(), eframe::Error> {
+fn run_daemon() -> Result<(), String> {
     let config = Config::load().unwrap_or_default();
     
     println!("🚀 yoinkctl daemon starting...");
     println!("📌 Hotkey: {}", config.hotkey);
     
-    let manager = GlobalHotKeyManager::new().expect("Failed to create hotkey manager");
+    let manager = GlobalHotKeyManager::new()
+        .map_err(|e| format!("Failed to create hotkey manager: {}", e))?;
     let modifiers = config.get_modifiers();
     let key_code = config.get_key_code();
     let hotkey = HotKey::new(Some(modifiers), key_code);
     
-    manager.register(hotkey).expect("Failed to register hotkey");
+    manager.register(hotkey)
+        .map_err(|e| format!("Failed to register hotkey: {}", e))?;
     
     println!("✅ Hotkey registered! Press {} to pick colors", config.hotkey);
     
-    let exe_path = env::current_exe().expect("Failed to get executable path");
+    let exe_path = env::current_exe()
+        .map_err(|e| format!("Failed to get exe path: {}", e))?;
     let receiver = global_hotkey::GlobalHotKeyEvent::receiver();
     let mut last_activation = std::time::Instant::now();
     
     loop {
         if let Ok(_event) = receiver.recv() {
             let now = std::time::Instant::now();
-            // Reduced from 500ms to 200ms for faster response
-            if now.duration_since(last_activation).as_millis() < 200 {
+            
+            // Increased debounce time to 500ms to prevent double-spawns
+            if now.duration_since(last_activation).as_millis() < 500 {
                 continue;
             }
+            
+            // Additional check: is a picker already running?
+            let lock_path = std::env::temp_dir().join("yoinkctl-picker.lock");
+            if lock_path.exists() {
+                if let Ok(pid_str) = std::fs::read_to_string(&lock_path) {
+                    if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                        #[cfg(target_os = "linux")]
+                        {
+                            if std::path::Path::new(&format!("/proc/{}", pid)).exists() {
+                                println!("Picker already running, ignoring hotkey");
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+            
             last_activation = now;
             
-            #[cfg(target_os = "linux")]
-            {
-                // Collect ALL current environment variables that might be needed
-                let mut cmd = Command::new(&exe_path);
-                cmd.arg("pick");
-                
-                // Core environment variables
-                if let Ok(val) = std::env::var("PATH") {
-                    cmd.env("PATH", val);
-                }
-                if let Ok(val) = std::env::var("HOME") {
-                    cmd.env("HOME", val);
-                }
-                
-                // Display server variables
-                if let Ok(val) = std::env::var("DISPLAY") {
-                    cmd.env("DISPLAY", val);
-                }
-                if let Ok(val) = std::env::var("WAYLAND_DISPLAY") {
-                    cmd.env("WAYLAND_DISPLAY", val);
-                }
-                
-                // XDG variables (critical for Wayland)
-                if let Ok(val) = std::env::var("XDG_RUNTIME_DIR") {
-                    cmd.env("XDG_RUNTIME_DIR", val);
-                }
-                if let Ok(val) = std::env::var("XDG_SESSION_TYPE") {
-                    cmd.env("XDG_SESSION_TYPE", val);
-                }
-                if let Ok(val) = std::env::var("XDG_CURRENT_DESKTOP") {
-                    cmd.env("XDG_CURRENT_DESKTOP", val);
-                }
-                if let Ok(val) = std::env::var("XDG_SESSION_DESKTOP") {
-                    cmd.env("XDG_SESSION_DESKTOP", val);
-                }
-                
-                // DBus (important for desktop integration)
-                if let Ok(val) = std::env::var("DBUS_SESSION_BUS_ADDRESS") {
-                    cmd.env("DBUS_SESSION_BUS_ADDRESS", val);
-                }
-                
-                // X11 auth
-                if let Ok(val) = std::env::var("XAUTHORITY") {
-                    cmd.env("XAUTHORITY", val);
-                }
-                
-                // Wayland socket (critical!)
-                if let Ok(val) = std::env::var("WAYLAND_SOCKET") {
-                    cmd.env("WAYLAND_SOCKET", val);
-                }
-                
-                // Qt/GTK theming (helps with consistent appearance)
-                if let Ok(val) = std::env::var("QT_QPA_PLATFORM") {
-                    cmd.env("QT_QPA_PLATFORM", val);
-                }
-                if let Ok(val) = std::env::var("GDK_BACKEND") {
-                    cmd.env("GDK_BACKEND", val);
-                }
-                
-                // User-specific variables that might be needed
-                if let Ok(val) = std::env::var("USER") {
-                    cmd.env("USER", val);
-                }
-                if let Ok(val) = std::env::var("LOGNAME") {
-                    cmd.env("LOGNAME", val);
-                }
-                
-                // CRITICAL: These prevent KDE's startup notification / bouncing icon
-                cmd.env("DESKTOP_STARTUP_ID", "");
-                cmd.env("GNOME_DESKTOP_STARTUP_ID", "");
-                
-                // Detach from parent process completely
-                cmd.stdin(std::process::Stdio::null());
-                cmd.stdout(std::process::Stdio::null());
-                cmd.stderr(std::process::Stdio::null());
-                
-                // Spawn the process
-                cmd.spawn().ok();
-            }
-            
-            #[cfg(not(target_os = "linux"))]
-            {
-                Command::new(&exe_path)
-                    .arg("pick")
-                    .env_remove("DESKTOP_STARTUP_ID")
-                    .spawn()
-                    .ok();
-            }
+            // Spawn the picker
+            Command::new(&exe_path)
+                .arg("pick")
+                .spawn()
+                .ok();
         }
     }
 }
 
 fn run_picker() -> Result<(), eframe::Error> {
+    // Use a proper file-based mutex for locking
     let lock_path = std::env::temp_dir().join("yoinkctl-picker.lock");
     
-    // Quick check if lock file exists and is valid
-    if lock_path.exists() {
-        if let Ok(pid_str) = std::fs::read_to_string(&lock_path) {
-            if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                #[cfg(target_os = "linux")]
-                {
-                    // Fast check: does /proc/PID exist?
-                    if std::path::Path::new(&format!("/proc/{}", pid)).exists() {
-                        println!("Color picker already running (PID: {}), ignoring...", pid);
-                        return Ok(());
-                    }
-                }
-                
-                #[cfg(not(target_os = "linux"))]
-                {
-                    // On non-Linux, try to send signal 0 to check if process exists
-                    use std::process::Command;
-                    if Command::new("kill")
-                        .args(&["-0", &pid.to_string()])
-                        .output()
-                        .map(|o| o.status.success())
-                        .unwrap_or(false)
+    // Try to create the lock file exclusively (atomic operation)
+    // This will fail if the file already exists
+    let lock_acquired = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+    {
+        Ok(mut file) => {
+            // Successfully created lock, write our PID
+            use std::io::Write;
+            let pid = std::process::id();
+            writeln!(file, "{}", pid).ok();
+            drop(file); // Ensure file is flushed
+            true
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Lock file exists, check if process is actually running
+            if let Ok(pid_str) = std::fs::read_to_string(&lock_path) {
+                if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                    #[cfg(target_os = "linux")]
                     {
-                        println!("Color picker already running (PID: {}), ignoring...", pid);
-                        return Ok(());
+                        if std::path::Path::new(&format!("/proc/{}", pid)).exists() {
+                            // Process is running, don't launch
+                            println!("Color picker already running (PID: {})", pid);
+                            return Ok(());
+                        }
                     }
                 }
             }
+            
+            // Lock file is stale, remove and retry
+            std::fs::remove_file(&lock_path).ok();
+            
+            // Small delay to ensure filesystem sync
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            
+            // Retry once after removing stale lock
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    let pid = std::process::id();
+                    writeln!(file, "{}", pid).ok();
+                    drop(file);
+                    true
+                }
+                Err(_) => {
+                    // Another process beat us to it
+                    println!("Another picker instance started first");
+                    return Ok(());
+                }
+            }
         }
-        // If we got here, lock file is stale - remove it
-        std::fs::remove_file(&lock_path).ok();
+        Err(_) => {
+            // Other error, bail
+            println!("Failed to create lock file");
+            return Ok(());
+        }
+    };
+    
+    if !lock_acquired {
+        return Ok(());
     }
     
-    // Write our PID immediately
-    let pid = std::process::id();
-    std::fs::write(&lock_path, pid.to_string()).ok();
-    
-    // Set environment for better Wayland compatibility
-    std::env::set_var("QT_QPA_PLATFORMTHEME", "");
-    std::env::set_var("QT_QPA_PLATFORM", "xcb");
-    std::env::remove_var("DESKTOP_STARTUP_ID");
-    
-    #[cfg(target_os = "linux")]
-    {
-        std::env::set_var("DESKTOP_STARTUP_ID", "");
-    }
+    // Small delay to ensure lock file is fully written before window appears
+    std::thread::sleep(std::time::Duration::from_millis(10));
     
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -218,7 +180,7 @@ fn run_picker() -> Result<(), eframe::Error> {
         Box::new(|cc| Ok(Box::new(ColorPicker::new(cc)))),
     );
     
-    // Clean up lock file
+    // Clean up lock file immediately on exit
     std::fs::remove_file(&lock_path).ok();
     result
 }
@@ -303,7 +265,6 @@ fn start_daemon() {
     {
         Command::new(&exe_path)
             .arg("daemon")
-            .env_remove("DESKTOP_STARTUP_ID")  // Only remove this one
             .spawn()
             .ok();
     }
@@ -335,7 +296,6 @@ impl eframe::App for ConfigApp {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.add_space(30.0);
                     
-                    // Header
                     ui.vertical_centered(|ui| {
                         ui.label(egui::RichText::new("yoinkctl").size(28.0).strong());
                         ui.add_space(4.0);
@@ -344,7 +304,6 @@ impl eframe::App for ConfigApp {
                     
                     ui.add_space(30.0);
                     
-                    // Center content with max width
                     ui.horizontal(|ui| {
                         let available = ui.available_width();
                         let max_width = 480.0;
@@ -355,12 +314,10 @@ impl eframe::App for ConfigApp {
                         ui.vertical(|ui| {
                             ui.set_width(available - margin * 2.0);
                             
-                            // Top Row: Daemon + Quick Launch side by side
                             ui.horizontal(|ui| {
                                 let card_width = (ui.available_width() - 16.0) / 2.0;
-                                let card_height = 150.0; // Increased from 140.0 for more space
+                                let card_height = 150.0;
                                 
-                                // Daemon Status Card
                                 ui.vertical(|ui| {
                                     ui.set_width(card_width);
                                     ui.set_height(card_height);
@@ -380,7 +337,7 @@ impl eframe::App for ConfigApp {
                                                         .color(egui::Color32::from_rgb(74, 222, 128))
                                                 );
                                                 ui.add_space(6.0);
-                                                ui.label(egui::RichText::new("Meta+Shift+A").size(12.0).color(egui::Color32::GRAY));
+                                                ui.label(egui::RichText::new(&self.config.hotkey).size(12.0).color(egui::Color32::GRAY));
                                             } else {
                                                 ui.label(
                                                     egui::RichText::new("○ Stopped")
@@ -421,7 +378,6 @@ impl eframe::App for ConfigApp {
                                 
                                 ui.add_space(16.0);
                                 
-                                // Quick Launch Card
                                 ui.vertical(|ui| {
                                     ui.set_width(card_width);
                                     ui.set_height(card_height);
@@ -448,23 +404,10 @@ impl eframe::App for ConfigApp {
                                                         .and_then(|p| p.to_str().map(|s| s.to_string()))
                                                         .unwrap_or_else(|| "yoinkctl".to_string());
                                                     
-                                                    #[cfg(target_os = "linux")]
-                                                    {
-                                                        Command::new("sh")
-                                                            .arg("-c")
-                                                            .arg(format!("{} pick &", exe_path))
-                                                            .spawn()
-                                                            .ok();
-                                                    }
-                                                    
-                                                    #[cfg(not(target_os = "linux"))]
-                                                    {
-                                                        Command::new(&exe_path)
-                                                            .arg("pick")
-                                                            .env_remove("DESKTOP_STARTUP_ID")  // Only remove this one
-                                                            .spawn()
-                                                            .ok();
-                                                    }
+                                                    Command::new(&exe_path)
+                                                        .arg("pick")
+                                                        .spawn()
+                                                        .ok();
                                                 }
                                             });
                                         });
@@ -473,7 +416,6 @@ impl eframe::App for ConfigApp {
                             
                             ui.add_space(16.0);
                             
-                            // Settings Card
                             egui::Frame::none()
                                 .fill(egui::Color32::from_rgb(28, 28, 32))
                                 .rounding(12.0)
@@ -482,12 +424,10 @@ impl eframe::App for ConfigApp {
                                     ui.label(egui::RichText::new("Settings").size(16.0).strong());
                                     ui.add_space(12.0);
                                     
-                                    // Hotkey Configuration
                                     ui.label(egui::RichText::new("Global Hotkey").size(14.0).strong());
                                     ui.add_space(8.0);
                                     
                                     ui.horizontal(|ui| {
-                                        // Parse current hotkey
                                         let parts: Vec<&str> = self.config.hotkey.split('+').collect();
                                         let current_key = parts.last().unwrap_or(&"A").trim().to_string();
                                         
@@ -509,7 +449,7 @@ impl eframe::App for ConfigApp {
                                         
                                         ui.label("+");
                                         
-                                        egui::ComboBox::from_id_source("key")
+                                        egui::ComboBox::from_id_salt("key")
                                             .selected_text(&new_key)
                                             .show_ui(ui, |ui| {
                                                 for key in 'A'..='Z' {
@@ -518,7 +458,6 @@ impl eframe::App for ConfigApp {
                                                 }
                                             });
                                         
-                                        // Rebuild hotkey string
                                         let mut parts = Vec::new();
                                         if new_super { parts.push("Super"); }
                                         if new_shift { parts.push("Shift"); }
@@ -546,7 +485,6 @@ impl eframe::App for ConfigApp {
                                     ui.separator();
                                     ui.add_space(12.0);
                                     
-                                    // Display Options
                                     ui.label(egui::RichText::new("Display Options").size(14.0).strong());
                                     ui.add_space(8.0);
                                     
@@ -558,13 +496,11 @@ impl eframe::App for ConfigApp {
                                     ui.separator();
                                     ui.add_space(12.0);
                                     
-                                    // Preview Size
                                     ui.label("Preview Size");
                                     ui.add(egui::Slider::new(&mut self.config.preview_size, 50..=200).suffix(" px"));
                                     
                                     ui.add_space(16.0);
                                     
-                                    // Save Button
                                     ui.horizontal(|ui| {
                                         if ui.add_sized(
                                             [120.0, 36.0],

@@ -1,88 +1,86 @@
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::path::PathBuf;
-use anyhow::Result;
+use global_hotkey::hotkey::{Modifiers, Code};
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub hotkey: String,
-    pub show_rgb: bool,
     pub show_hex: bool,
+    pub show_rgb: bool,
     pub show_hsl: bool,
-    pub preview_size: i32,
+    pub preview_size: u32,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             hotkey: "Super+Shift+A".to_string(),
-            show_rgb: true,
             show_hex: true,
-            show_hsl: false,
-            preview_size: 100,
+            show_rgb: true,
+            show_hsl: true,
+            preview_size: 120,
         }
     }
 }
 
 impl Config {
-    pub fn load() -> Result<Self> {
-        let path = Self::config_path()?;
+    pub fn config_path() -> PathBuf {
+        let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+        path.push("yoinkctl");
+        std::fs::create_dir_all(&path).ok();
+        path.push("config.json");
+        path
+    }
+    
+    pub fn load() -> Result<Self, String> {
+        let path = Self::config_path();
         
         if !path.exists() {
             return Ok(Self::default());
         }
         
-        let contents = fs::read_to_string(&path)?;
-        let config = serde_json::from_str(&contents)?;
-        Ok(config)
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read config: {}", e))?;
+        
+        serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse config: {}", e))
     }
     
-    pub fn save(&self) -> Result<()> {
-        let path = Self::config_path()?;
+    pub fn save(&self) -> Result<(), String> {
+        let path = Self::config_path();
         
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+        let content = serde_json::to_string_pretty(self)
+            .map_err(|e| format!("Failed to serialize config: {}", e))?;
         
-        let contents = serde_json::to_string_pretty(self)?;
-        fs::write(&path, contents)?;
-        
-        Ok(())
+        std::fs::write(&path, content)
+            .map_err(|e| format!("Failed to write config: {}", e))
     }
     
-    fn config_path() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir()
-            .ok_or_else(|| anyhow::anyhow!("Could not find config directory"))?;
-        
-        Ok(config_dir.join("yoinkctl").join("config.json"))
-    }
-    
-    // Parse hotkey string into modifiers and key
-    pub fn get_modifiers(&self) -> global_hotkey::hotkey::Modifiers {
-        use global_hotkey::hotkey::Modifiers;
-        
-        let parts: Vec<&str> = self.hotkey.split('+').collect();
+    pub fn get_modifiers(&self) -> Modifiers {
         let mut modifiers = Modifiers::empty();
         
-        for part in &parts[..parts.len().saturating_sub(1)] {
-            match part.trim() {
-                "Super" | "Meta" => modifiers |= Modifiers::SUPER,
-                "Shift" => modifiers |= Modifiers::SHIFT,
-                "Ctrl" | "Control" => modifiers |= Modifiers::CONTROL,
-                "Alt" => modifiers |= Modifiers::ALT,
-                _ => {}
-            }
+        if self.hotkey.contains("Super") {
+            modifiers |= Modifiers::SUPER;
+        }
+        if self.hotkey.contains("Shift") {
+            modifiers |= Modifiers::SHIFT;
+        }
+        if self.hotkey.contains("Ctrl") {
+            modifiers |= Modifiers::CONTROL;
+        }
+        if self.hotkey.contains("Alt") {
+            modifiers |= Modifiers::ALT;
         }
         
         modifiers
     }
     
-    pub fn get_key_code(&self) -> global_hotkey::hotkey::Code {
-        use global_hotkey::hotkey::Code;
-        
+    pub fn get_key_code(&self) -> Code {
+        // Extract the key from the hotkey string
         let parts: Vec<&str> = self.hotkey.split('+').collect();
         let key = parts.last().unwrap_or(&"A").trim();
         
+        // Map the key string to a Code
         match key {
             "A" => Code::KeyA,
             "B" => Code::KeyB,
@@ -110,7 +108,7 @@ impl Config {
             "X" => Code::KeyX,
             "Y" => Code::KeyY,
             "Z" => Code::KeyZ,
-            _ => Code::KeyA, // default fallback
+            _ => Code::KeyA, // Default fallback
         }
     }
 }

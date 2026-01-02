@@ -2,7 +2,6 @@ use eframe::egui;
 use xcap::Monitor;
 use image::RgbaImage;
 use arboard::Clipboard;
-use std::process::Command;
 use crate::config::Config;
 
 pub struct ColorPicker {
@@ -12,21 +11,13 @@ pub struct ColorPicker {
     magnifier_pos: egui::Pos2,
     magnifier_offset: egui::Vec2,
     should_close: bool,
-    made_sticky: bool,
     config: Config,
-    initialized: bool,  // NEW: track if we've gotten first real cursor position
+    initialized: bool,
 }
 
 impl ColorPicker {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let (screenshot, offset) = capture_all_screens();
-        
-        eprintln!("🎨 ColorPicker created");
-        eprintln!("   Screenshot captured: {}", screenshot.is_some());
-        if let Some(ref img) = screenshot {
-            eprintln!("   Screenshot size: {}x{}", img.width(), img.height());
-        }
-        eprintln!("   Screenshot offset: {:?}", offset);
         
         Self {
             screenshot,
@@ -35,141 +26,9 @@ impl ColorPicker {
             magnifier_pos: egui::Pos2::ZERO,
             magnifier_offset: egui::vec2(30.0, 30.0),
             should_close: false,
-            made_sticky: false,
             config: Config::load().unwrap_or_default(),
             initialized: false,
         }
-    }
-    
-    fn make_window_sticky(&mut self) {
-        #[cfg(target_os = "linux")]
-        {
-            std::thread::spawn(|| {
-                // Give the window time to fully initialize
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                
-                // Check session type
-                let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
-                
-                if session_type == "wayland" {
-                    eprintln!("Detected Wayland, using KWin DBus scripting...");
-                    
-                    // Proper KWin script based on official API docs
-                    let script = r#"
-var clients = workspace.clientList();
-for (var i = 0; i < clients.length; i++) {
-    var client = clients[i];
-    if (client.caption.indexOf("yoinkctl") !== -1 || 
-        client.resourceClass.indexOf("yoinkctl") !== -1) {
-        client.onAllDesktops = true;
-        console.log("Made yoinkctl sticky: " + client.caption);
-    }
-}
-"#;
-                    
-                    // Save script to temp file (more reliable than inline)
-                    let script_path = "/tmp/yoinkctl_sticky.js";
-                    std::fs::write(script_path, script).ok();
-                    
-                    // Try qdbus6 first (KDE 6)
-                    let result = Command::new("qdbus6")
-                        .args(&[
-                            "org.kde.KWin",
-                            "/Scripting",
-                            "org.kde.kwin.Scripting.loadScript",
-                            script_path,
-                        ])
-                        .output();
-                    
-                    if result.is_ok() {
-                        eprintln!("✓ Script loaded via qdbus6");
-                        
-                        // Run the script
-                        if let Ok(out) = result {
-                            if let Ok(script_id) = String::from_utf8(out.stdout) {
-                                let script_id = script_id.trim();
-                                if !script_id.is_empty() {
-                                    Command::new("qdbus6")
-                                        .args(&[
-                                            "org.kde.KWin",
-                                            &format!("/{}", script_id),
-                                            "org.kde.kwin.Script.run",
-                                        ])
-                                        .output()
-                                        .ok();
-                                    eprintln!("✓ Script executed");
-                                }
-                            }
-                        }
-                    } else {
-                        // Fallback to qdbus (KDE 5)
-                        let result = Command::new("qdbus")
-                            .args(&[
-                                "org.kde.KWin",
-                                "/Scripting",
-                                "org.kde.kwin.Scripting.loadScript",
-                                script_path,
-                            ])
-                            .output();
-                        
-                        if let Ok(out) = result {
-                            eprintln!("✓ Script loaded via qdbus");
-                            if let Ok(script_id) = String::from_utf8(out.stdout) {
-                                let script_id = script_id.trim();
-                                if !script_id.is_empty() {
-                                    Command::new("qdbus")
-                                        .args(&[
-                                            "org.kde.KWin",
-                                            &format!("/{}", script_id),
-                                            "org.kde.kwin.Script.run",
-                                        ])
-                                        .output()
-                                        .ok();
-                                    eprintln!("✓ Script executed");
-                                }
-                            }
-                        }
-                    }
-                    
-                    // Clean up
-                    std::fs::remove_file(script_path).ok();
-                    
-                } else {
-                    // X11 path
-                    eprintln!("Detected X11, using wmctrl...");
-                    std::thread::sleep(std::time::Duration::from_millis(300));
-                    
-                    Command::new("wmctrl")
-                        .args(&["-r", "yoinkctl Picker", "-b", "add,sticky"])
-                        .output()
-                        .ok();
-                    
-                    let wmctrl_list = Command::new("wmctrl")
-                        .arg("-l")
-                        .output();
-                        
-                    if let Ok(output) = wmctrl_list {
-                        if let Ok(list) = String::from_utf8(output.stdout) {
-                            for line in list.lines() {
-                                if line.contains("yoinkctl") {
-                                    if let Some(win_id) = line.split_whitespace().next() {
-                                        Command::new("wmctrl")
-                                            .args(&["-i", "-r", win_id, "-b", "add,sticky"])
-                                            .output()
-                                            .ok();
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    
-                    eprintln!("✓ Attempted to make window sticky via wmctrl");
-                }
-            });
-        }
-        
-        self.made_sticky = true;
     }
     
     fn get_color_at_cursor(&self) -> Option<egui::Color32> {
@@ -178,19 +37,11 @@ for (var i = 0; i < clients.length; i++) {
         let x = (self.cursor_pos.x as i32 + self.screenshot_offset.0).max(0) as u32;
         let y = (self.cursor_pos.y as i32 + self.screenshot_offset.1).max(0) as u32;
         
-        eprintln!("🔍 Get color at cursor:");
-        eprintln!("   Cursor pos: {:?}", self.cursor_pos);
-        eprintln!("   Screenshot offset: {:?}", self.screenshot_offset);
-        eprintln!("   Calculated x: {}, y: {}", x, y);
-        eprintln!("   Screenshot size: {}x{}", screenshot.width(), screenshot.height());
-        
         if x >= screenshot.width() || y >= screenshot.height() {
-            eprintln!("   ❌ OUT OF BOUNDS!");
             return None;
         }
         
         let pixel = screenshot.get_pixel(x, y);
-        eprintln!("   ✅ Color found: RGB({}, {}, {})", pixel[0], pixel[1], pixel[2]);
         
         Some(egui::Color32::from_rgba_premultiplied(
             pixel[0], pixel[1], pixel[2], 255
@@ -204,7 +55,7 @@ for (var i = 0; i < clients.length; i++) {
             if let Err(e) = clipboard.set_text(&hex) {
                 eprintln!("Failed to copy to clipboard: {}", e);
             } else {
-                eprintln!("✅ Copied to clipboard: {}", hex);
+                println!("✅ Copied to clipboard: {}", hex);
             }
         }
     }
@@ -242,41 +93,26 @@ impl eframe::App for ColorPicker {
         egui::Rgba::TRANSPARENT.to_array()
     }
     
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        // Make window sticky after first frame
-        if !self.made_sticky {
-            self.make_window_sticky();
-        }
-        
-        // Close immediately if flagged
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.should_close {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
         
-        // Hide default cursor
         ctx.set_cursor_icon(egui::CursorIcon::None);
         
-        // Get current cursor position
         if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
             if !self.initialized {
-                eprintln!("🎯 First cursor position received: {:?}", pos);
                 self.initialized = true;
             }
             self.cursor_pos = pos;
-        } else {
-            if let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) {
-                if !self.initialized {
-                    eprintln!("🎯 Using latest_pos instead: {:?}", pos);
-                    self.initialized = true;
-                }
-                self.cursor_pos = pos;
-            } else {
-                eprintln!("⚠️  No cursor position available!");
+        } else if let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) {
+            if !self.initialized {
+                self.initialized = true;
             }
+            self.cursor_pos = pos;
         }
         
-        // Smooth magnifier following
         let max_distance = 150.0;
         let smoothing = 0.15;
         
@@ -291,37 +127,26 @@ impl eframe::App for ColorPicker {
         self.magnifier_pos.x += (target_pos.x - self.magnifier_pos.x) * smoothing;
         self.magnifier_pos.y += (target_pos.y - self.magnifier_pos.y) * smoothing;
         
-        // Check for escape key
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            eprintln!("🚪 Escape pressed, closing...");
             self.should_close = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
         
-        // Check for mouse click - FIXED: Use frame.close() instead of std::process::exit()
         if ctx.input(|i| i.pointer.primary_clicked()) {
-            eprintln!("🖱️  CLICK DETECTED!");
             if let Some(color) = self.get_color_at_cursor() {
-                eprintln!("🎨 COLOR FOUND: {:?}", color);
                 self.copy_to_clipboard(color);
-                
-                // Use proper cleanup instead of exit
                 self.should_close = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 return;
-            } else {
-                eprintln!("❌ get_color_at_cursor returned None!");
             }
         }
         
-        // Draw fullscreen overlay
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(egui::Color32::TRANSPARENT))
             .show(ctx, |ui| {
                 let screen_rect = ui.max_rect();
                 
-                // Draw magnifying glass and info
                 if let Some(color) = self.get_color_at_cursor() {
                     let mag_size = self.config.preview_size as f32;
                     
@@ -339,7 +164,6 @@ impl eframe::App for ColorPicker {
                     
                     let mag_pos = self.magnifier_pos + self.magnifier_offset;
                     
-                    // Draw zoomed pixels (11x11 grid)
                     let zoom = 5;
                     let pixel_size = mag_size / 11.0;
                     
@@ -377,7 +201,6 @@ impl eframe::App for ColorPicker {
                         }
                     }
                     
-                    // White border around magnifier
                     let mag_rect = egui::Rect::from_min_size(mag_pos, egui::vec2(mag_size, mag_size));
                     ui.painter().rect_stroke(
                         mag_rect,
@@ -385,7 +208,6 @@ impl eframe::App for ColorPicker {
                         egui::Stroke::new(3.0, egui::Color32::WHITE),
                     );
                     
-                    // Text info below magnifier
                     if info_height > 0.0 {
                         let info_y = if self.magnifier_offset.y < 0.0 {
                             mag_pos.y - info_height - 10.0
@@ -533,7 +355,6 @@ impl eframe::App for ColorPicker {
                     }
                 }
                 
-                // Draw crosshair at cursor
                 let crosshair_size = 20.0;
                 ui.painter().line_segment(
                     [
@@ -556,26 +377,14 @@ impl eframe::App for ColorPicker {
 }
 
 fn capture_all_screens() -> (Option<RgbaImage>, (i32, i32)) {
-    eprintln!("📸 Capturing screen...");
-    
     if let Ok(monitors) = Monitor::all() {
-        eprintln!("   Found {} monitor(s)", monitors.len());
-        
         if let Some(monitor) = monitors.first() {
-            eprintln!("   Using monitor: {}x{} at ({}, {})", 
-                monitor.width(), monitor.height(), monitor.x(), monitor.y());
-            
             if let Ok(image) = monitor.capture_image() {
                 let x_offset = monitor.x();
                 let y_offset = monitor.y();
-                eprintln!("   ✅ Screenshot captured successfully");
                 return (Some(image), (x_offset, y_offset));
-            } else {
-                eprintln!("   ❌ Failed to capture image");
             }
         }
-    } else {
-        eprintln!("   ❌ Failed to get monitors");
     }
     
     (None, (0, 0))
