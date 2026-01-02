@@ -9,6 +9,8 @@ pub struct ColorPicker {
     screenshot: Option<RgbaImage>,
     screenshot_offset: (i32, i32),
     cursor_pos: egui::Pos2,
+    magnifier_pos: egui::Pos2, // Smoothed position for magnifier
+    magnifier_offset: egui::Vec2, // Smoothed offset for magnifier positioning
     should_close: bool,
     made_sticky: bool,
     config: Config,
@@ -22,6 +24,8 @@ impl ColorPicker {
             screenshot,
             screenshot_offset: offset,
             cursor_pos: egui::Pos2::ZERO,
+            magnifier_pos: egui::Pos2::ZERO, // Start at same position
+            magnifier_offset: egui::vec2(30.0, 30.0), // Start with default offset
             should_close: false,
             made_sticky: false,
             config: Config::load().unwrap_or_default(),
@@ -187,36 +191,36 @@ for (var i = 0; i < clients.length; i++) {
         }
     }
     
-    // Calculate smart position for magnifier to keep it on screen
-    fn calculate_magnifier_position(&self, mag_size: f32, info_height: f32, screen_rect: egui::Rect) -> egui::Vec2 {
+    // Calculate target offset for magnifier to keep it on screen
+    fn calculate_magnifier_offset(&self, mag_size: f32, info_height: f32, screen_rect: egui::Rect) -> egui::Vec2 {
         let margin = 30.0; // X and Y offset when cursor goes down/right
-        let small_margin = 30.0; // Y offset when cursor goes up (reduced margin for top positioning)
+        let small_margin = 10.0; // Y offset when cursor goes up (reduced margin for top positioning)
         let total_height = mag_size + info_height + 10.0; // mag + gap + info box
         
         // Default offset (bottom-right of cursor)
         let mut offset_x = margin;
         let mut offset_y = margin;
         
-        // Check right edge
-        if self.cursor_pos.x + margin + mag_size > screen_rect.max.x {
+        // Check right edge (use magnifier_pos for calculations)
+        if self.magnifier_pos.x + margin + mag_size > screen_rect.max.x {
             // Move to left side of cursor
             offset_x = -(mag_size + margin);
         }
         
         // Check bottom edge
-        if self.cursor_pos.y + margin + total_height > screen_rect.max.y {
+        if self.magnifier_pos.y + margin + total_height > screen_rect.max.y {
             // Move to top side of cursor with smaller margin
             offset_y = -(mag_size + small_margin);
         }
         
         // Check top edge (when moved up)
-        if self.cursor_pos.y + offset_y < screen_rect.min.y {
-            offset_y = -self.cursor_pos.y + small_margin + screen_rect.min.y;
+        if self.magnifier_pos.y + offset_y < screen_rect.min.y {
+            offset_y = -self.magnifier_pos.y + small_margin + screen_rect.min.y;
         }
         
         // Check left edge (when moved left)
-        if self.cursor_pos.x + offset_x < screen_rect.min.x {
-            offset_x = -self.cursor_pos.x + margin + screen_rect.min.x;
+        if self.magnifier_pos.x + offset_x < screen_rect.min.x {
+            offset_x = -self.magnifier_pos.x + margin + screen_rect.min.x;
         }
         
         egui::vec2(offset_x, offset_y)
@@ -247,6 +251,23 @@ impl eframe::App for ColorPicker {
         if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
             self.cursor_pos = pos;
         }
+        
+        // Smooth magnifier following with easing and distance clamping
+        let max_distance = 150.0; // Maximum distance magnifier can be from cursor
+        let smoothing = 0.15; // Lower = smoother but slower, higher = faster but less smooth
+        
+        let target_pos = self.cursor_pos;
+        let current_distance = self.magnifier_pos.distance(target_pos);
+        
+        // If distance is too large, snap closer
+        if current_distance > max_distance {
+            let direction = (target_pos - self.magnifier_pos) / current_distance;
+            self.magnifier_pos = target_pos - direction * max_distance;
+        }
+        
+        // Smooth interpolation (lerp with easing)
+        self.magnifier_pos.x += (target_pos.x - self.magnifier_pos.x) * smoothing;
+        self.magnifier_pos.y += (target_pos.y - self.magnifier_pos.y) * smoothing;
         
         // Check for escape key
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -283,9 +304,16 @@ impl eframe::App for ColorPicker {
                     if self.config.show_hsl { line_count += 1; }
                     let info_height = if line_count > 0 { 15.0 + (line_count as f32 * 20.0) } else { 0.0 };
                     
-                    // Calculate smart position based on cursor location
-                    let mag_offset = self.calculate_magnifier_position(mag_size, info_height, screen_rect);
-                    let mag_pos = self.cursor_pos + mag_offset;
+                    // Calculate target offset based on screen position
+                    let target_offset = self.calculate_magnifier_offset(mag_size, info_height, screen_rect);
+                    
+                    // Smooth offset interpolation (faster than position for snappier feel)
+                    let offset_smoothing = 0.25;
+                    self.magnifier_offset.x += (target_offset.x - self.magnifier_offset.x) * offset_smoothing;
+                    self.magnifier_offset.y += (target_offset.y - self.magnifier_offset.y) * offset_smoothing;
+                    
+                    // Apply smoothed offset to magnifier position
+                    let mag_pos = self.magnifier_pos + self.magnifier_offset;
                     
                     // Draw zoomed pixels (11x11 grid)
                     let zoom = 5;
@@ -336,7 +364,7 @@ impl eframe::App for ColorPicker {
                     
                     // Text info below magnifier (adjust position based on where magnifier is)
                     if info_height > 0.0 {
-                        let info_y = if mag_offset.y < 0.0 {
+                        let info_y = if self.magnifier_offset.y < 0.0 {
                             // Magnifier is above cursor, put info above magnifier
                             mag_pos.y - info_height - 10.0
                         } else {
