@@ -111,4 +111,14 @@ impl Config {
             _ => Code::KeyA, // Default fallback
         }
     }
+    
+    /// Validates that the hotkey has at least one modifier
+    pub fn validate_hotkey(&self) -> Result<(), String> {
+        let modifiers = self.get_modifiers();
+        if modifiers.is_empty() {
+            Err("Hotkey must have at least one modifier (Super, Shift, Ctrl, or Alt)".to_string())
+        } else {
+            Ok(())
+        }
+    }
 }

@@ -5,9 +5,11 @@ use global_hotkey::{GlobalHotKeyManager, hotkey::HotKey};
 
 mod picker;
 mod config;
+mod autostart;
 
 use picker::ColorPicker;
 use config::Config;
+use autostart::Autostart;
 
 fn main() -> Result<(), eframe::Error> {
     let args: Vec<String> = env::args().collect();
@@ -38,8 +40,15 @@ fn run_daemon() -> Result<(), String> {
     
     let manager = GlobalHotKeyManager::new()
         .map_err(|e| format!("Failed to create hotkey manager: {}", e))?;
+    
     let modifiers = config.get_modifiers();
     let key_code = config.get_key_code();
+    
+    // Validate that at least one modifier is set
+    if modifiers.is_empty() {
+        return Err("Hotkey must have at least one modifier (Super, Shift, Ctrl, or Alt)".to_string());
+    }
+    
     let hotkey = HotKey::new(Some(modifiers), key_code);
     
     manager.register(hotkey)
@@ -188,9 +197,9 @@ fn run_picker() -> Result<(), eframe::Error> {
 fn run_config_gui() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([600.0, 480.0])
+            .with_inner_size([600.0, 520.0])
             .with_resizable(true)
-            .with_min_inner_size([500.0, 400.0]),
+            .with_min_inner_size([500.0, 440.0]),
         ..Default::default()
     };
     
@@ -212,6 +221,7 @@ struct ConfigApp {
     config: Config,
     daemon_running: bool,
     save_message: Option<(String, std::time::Instant)>,
+    autostart: Autostart,
 }
 
 impl ConfigApp {
@@ -220,6 +230,7 @@ impl ConfigApp {
             config: Config::load().unwrap_or_default(),
             daemon_running: is_daemon_running(),
             save_message: None,
+            autostart: Autostart::new(),
         }
     }
 }
@@ -469,17 +480,55 @@ impl eframe::App for ConfigApp {
                                     });
                                     
                                     ui.add_space(6.0);
-                                    ui.label(
-                                        egui::RichText::new(&format!("Current: {}", self.config.hotkey))
-                                            .size(12.0)
-                                            .color(egui::Color32::from_gray(180))
-                                    );
+                                    
+                                    // Validation warning
+                                    let parts: Vec<&str> = self.config.hotkey.split('+').collect();
+                                    let modifier_count = parts.len() - 1; // Subtract the key itself
+                                    
+                                    if modifier_count == 0 {
+                                        ui.label(
+                                            egui::RichText::new("⚠️ At least one modifier required (Super/Shift/Ctrl/Alt)")
+                                                .size(11.0)
+                                                .color(egui::Color32::from_rgb(239, 68, 68))
+                                        );
+                                    } else {
+                                        ui.label(
+                                            egui::RichText::new(&format!("Current: {}", self.config.hotkey))
+                                                .size(12.0)
+                                                .color(egui::Color32::from_gray(180))
+                                        );
+                                    }
+                                    
                                     ui.add_space(4.0);
                                     ui.label(
                                         egui::RichText::new("⚠️ Restart daemon after changing")
                                             .size(11.0)
                                             .color(egui::Color32::from_rgb(251, 191, 36))
                                     );
+                                    
+                                    ui.add_space(12.0);
+                                    ui.separator();
+                                    ui.add_space(12.0);
+                                    
+                                    ui.label(egui::RichText::new("Startup Options").size(14.0).strong());
+                                    ui.add_space(8.0);
+                                    
+                                    let mut autostart_enabled = self.autostart.is_enabled();
+                                    if ui.checkbox(&mut autostart_enabled, "Launch daemon at startup").changed() {
+                                        if autostart_enabled {
+                                            if let Err(e) = self.autostart.enable() {
+                                                self.save_message = Some((format!("Autostart error: {}", e), std::time::Instant::now()));
+                                            } else {
+                                                self.save_message = Some(("Autostart enabled!".to_string(), std::time::Instant::now()));
+                                            }
+                                        } else {
+                                            if let Err(e) = self.autostart.disable() {
+                                                self.save_message = Some((format!("Autostart error: {}", e), std::time::Instant::now()));
+                                            } else {
+                                                self.save_message = Some(("Autostart disabled!".to_string(), std::time::Instant::now()));
+                                            }
+                                        }
+                                    }
                                     
                                     ui.add_space(12.0);
                                     ui.separator();
@@ -508,19 +557,29 @@ impl eframe::App for ConfigApp {
                                                 .fill(egui::Color32::from_rgb(34, 197, 94))
                                                 .rounding(8.0)
                                         ).clicked() {
-                                            match self.config.save() {
-                                                Ok(_) => {
-                                                    self.save_message = Some(("Settings saved!".to_string(), std::time::Instant::now()));
-                                                }
-                                                Err(e) => {
-                                                    self.save_message = Some((format!("Error: {}", e), std::time::Instant::now()));
+                                            // Validate hotkey before saving
+                                            if let Err(e) = self.config.validate_hotkey() {
+                                                self.save_message = Some((format!("Invalid hotkey: {}", e), std::time::Instant::now()));
+                                            } else {
+                                                match self.config.save() {
+                                                    Ok(_) => {
+                                                        self.save_message = Some(("Settings saved!".to_string(), std::time::Instant::now()));
+                                                    }
+                                                    Err(e) => {
+                                                        self.save_message = Some((format!("Error: {}", e), std::time::Instant::now()));
+                                                    }
                                                 }
                                             }
                                         }
                                         
                                         if let Some((msg, _)) = &self.save_message {
                                             ui.add_space(8.0);
-                                            ui.label(egui::RichText::new(msg).color(egui::Color32::from_rgb(34, 197, 94)));
+                                            let color = if msg.contains("Invalid") || msg.contains("Error") {
+                                                egui::Color32::from_rgb(239, 68, 68)
+                                            } else {
+                                                egui::Color32::from_rgb(34, 197, 94)
+                                            };
+                                            ui.label(egui::RichText::new(msg).color(color));
                                         }
                                     });
                                 });
