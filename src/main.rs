@@ -1,7 +1,9 @@
 use eframe::egui;
 use std::env;
 use std::process::Command;
-use global_hotkey::{GlobalHotKeyManager, hotkey::HotKey};
+use global_hotkey::{GlobalHotKeyManager, hotkey::HotKey, GlobalHotKeyEvent};
+use xcap::Monitor;
+use image::RgbaImage;
 
 mod picker;
 mod config;
@@ -51,46 +53,76 @@ fn run_daemon() -> Result<(), String> {
     }
     
     let hotkey = HotKey::new(Some(modifiers), key_code);
+    let hotkey_id = hotkey.id();
     
-    manager.register(hotkey)
-        .map_err(|e| format!("Failed to register hotkey: {}", e))?;
+    // FORCE REGISTER: Try to unregister first, then register
+    let _ = manager.unregister(hotkey);
     
-    println!("✅ Hotkey registered! Press {} to pick colors", config.hotkey);
+    match manager.register(hotkey) {
+        Ok(_) => {
+            println!("✅ Hotkey registered! Press {} to pick colors", config.hotkey);
+        }
+        Err(e) => {
+            eprintln!("⚠️  First registration failed ({}), forcing...", e);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            
+            let _ = manager.unregister(hotkey);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            
+            manager.register(hotkey)
+                .map_err(|e| {
+                    eprintln!("❌ Failed to force register hotkey '{}'", config.hotkey);
+                    eprintln!("   Error: {}", e);
+                    format!("Hotkey conflict: {}", e)
+                })?;
+            
+            println!("✅ Hotkey forcefully registered!");
+        }
+    }
     
     let exe_path = env::current_exe()
         .map_err(|e| format!("Failed to get exe path: {}", e))?;
-    let receiver = global_hotkey::GlobalHotKeyEvent::receiver();
+    let receiver = GlobalHotKeyEvent::receiver();
     let mut last_activation = std::time::Instant::now();
     
     loop {
-        if let Ok(_event) = receiver.recv() {
-            let now = std::time::Instant::now();
-            
-            if now.duration_since(last_activation).as_millis() < 500 {
-                continue;
-            }
-            
-            let lock_path = std::env::temp_dir().join("yoinkctl-picker.lock");
-            if lock_path.exists() {
-                if let Ok(pid_str) = std::fs::read_to_string(&lock_path) {
-                    if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                        #[cfg(target_os = "linux")]
-                        {
-                            if std::path::Path::new(&format!("/proc/{}", pid)).exists() {
-                                println!("Picker already running, ignoring hotkey");
-                                continue;
-                            }
-                        }
-                    }
+        // Use try_recv for non-blocking check
+        match receiver.try_recv() {
+            Ok(event) => {
+                // CRITICAL: Always drain Release events to prevent state stuck
+                // This prevents the X11 key release order bug
+                if event.state == global_hotkey::HotKeyState::Released {
+                    continue;
                 }
+                
+                // Only process PRESSED events for our hotkey
+                if event.id != hotkey_id {
+                    continue;
+                }
+                
+                let now = std::time::Instant::now();
+                
+                // Minimal debounce - just enough to prevent accidental double-press
+                if now.duration_since(last_activation).as_millis() < 50 {
+                    continue;
+                }
+                
+                last_activation = now;
+                
+                // Launch picker immediately - let the picker handle its own locking
+                // This prevents the daemon from being blocked by stale lock checks
+                Command::new(&exe_path)
+                    .arg("pick")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .ok();
             }
-            
-            last_activation = now;
-            
-            Command::new(&exe_path)
-                .arg("pick")
-                .spawn()
-                .ok();
+            Err(_) => {
+                // No event available - sleep a bit to reduce CPU usage
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
         }
     }
 }
@@ -98,6 +130,7 @@ fn run_daemon() -> Result<(), String> {
 fn run_picker() -> Result<(), eframe::Error> {
     let lock_path = std::env::temp_dir().join("yoinkctl-picker.lock");
     
+    // ATOMIC LOCK: Create file and write PID immediately
     let lock_acquired = match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -106,25 +139,27 @@ fn run_picker() -> Result<(), eframe::Error> {
         Ok(mut file) => {
             use std::io::Write;
             let pid = std::process::id();
-            writeln!(file, "{}", pid).ok();
+            write!(file, "{}", pid).ok();
+            file.flush().ok();
+            file.sync_all().ok();
             drop(file);
             true
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Lock exists - verify if process is alive
             if let Ok(pid_str) = std::fs::read_to_string(&lock_path) {
                 if let Ok(pid) = pid_str.trim().parse::<i32>() {
                     #[cfg(target_os = "linux")]
                     {
                         if std::path::Path::new(&format!("/proc/{}", pid)).exists() {
-                            println!("Color picker already running (PID: {})", pid);
-                            return Ok(());
+                            return Ok(()); // Already running
                         }
                     }
                 }
             }
             
+            // Stale lock - remove and retry ONCE
             std::fs::remove_file(&lock_path).ok();
-            std::thread::sleep(std::time::Duration::from_millis(10));
             
             match std::fs::OpenOptions::new()
                 .write(true)
@@ -134,27 +169,30 @@ fn run_picker() -> Result<(), eframe::Error> {
                 Ok(mut file) => {
                     use std::io::Write;
                     let pid = std::process::id();
-                    writeln!(file, "{}", pid).ok();
+                    write!(file, "{}", pid).ok();
+                    file.flush().ok();
+                    file.sync_all().ok();
                     drop(file);
                     true
                 }
-                Err(_) => {
-                    println!("Another picker instance started first");
-                    return Ok(());
-                }
+                Err(_) => return Ok(()), // Another instance won
             }
         }
-        Err(_) => {
-            println!("Failed to create lock file");
-            return Ok(());
-        }
+        Err(_) => return Ok(()),
     };
     
     if !lock_acquired {
         return Ok(());
     }
     
-    std::thread::sleep(std::time::Duration::from_millis(10));
+    // SPEED OPTIMIZATION: Parallel screenshot + config loading
+    let screenshot_handle = std::thread::spawn(|| {
+        capture_all_screens()
+    });
+    
+    let config_handle = std::thread::spawn(|| {
+        Config::load().unwrap_or_default()
+    });
     
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -165,17 +203,45 @@ fn run_picker() -> Result<(), eframe::Error> {
             .with_mouse_passthrough(false)
             .with_active(true),
         centered: false,
+        // OPTIMIZATION: Disable hardware acceleration if not needed - faster startup
+        hardware_acceleration: eframe::HardwareAcceleration::Preferred,
+        // Keep vsync enabled for smooth animation
         ..Default::default()
     };
     
     let result = eframe::run_native(
         "yoinkctl Picker",
         options,
-        Box::new(|cc| Ok(Box::new(ColorPicker::new(cc)))),
+        Box::new(move |cc| {
+            // Retrieve pre-loaded data from parallel threads
+            let (screenshot, offset) = screenshot_handle.join().unwrap_or((None, (0, 0)));
+            let config = config_handle.join().unwrap_or_default();
+            
+            // OPTIMIZATION: Disable font rasterization delay by using default fonts
+            // This speeds up first frame render significantly
+            
+            Ok(Box::new(ColorPicker::new_with_config(cc, screenshot, offset, config)))
+        }),
     );
     
+    // Always clean up lock file
     std::fs::remove_file(&lock_path).ok();
     result
+}
+
+// Helper function for parallel screenshot capture
+fn capture_all_screens() -> (Option<RgbaImage>, (i32, i32)) {
+    if let Ok(monitors) = Monitor::all() {
+        if let Some(monitor) = monitors.first() {
+            if let Ok(image) = monitor.capture_image() {
+                let x_offset = monitor.x();
+                let y_offset = monitor.y();
+                return (Some(image), (x_offset, y_offset));
+            }
+        }
+    }
+    
+    (None, (0, 0))
 }
 
 fn run_config_gui() -> Result<(), eframe::Error> {

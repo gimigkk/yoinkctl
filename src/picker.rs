@@ -32,6 +32,34 @@ impl ColorPicker {
         }
     }
     
+    // OPTIMIZED: Accept pre-captured screenshot to avoid duplicate capture
+    pub fn new_with_screenshot(_cc: &eframe::CreationContext<'_>, screenshot: Option<RgbaImage>, offset: (i32, i32)) -> Self {
+        Self {
+            screenshot,
+            screenshot_offset: offset,
+            cursor_pos: egui::Pos2::ZERO,
+            magnifier_pos: egui::Pos2::ZERO,
+            magnifier_offset: egui::vec2(30.0, 30.0),
+            should_close: false,
+            config: Config::load().unwrap_or_default(),
+            initialized: false,
+        }
+    }
+    
+    // OPTIMIZED: Accept pre-loaded config AND screenshot for fastest startup
+    pub fn new_with_config(_cc: &eframe::CreationContext<'_>, screenshot: Option<RgbaImage>, offset: (i32, i32), config: Config) -> Self {
+        Self {
+            screenshot,
+            screenshot_offset: offset,
+            cursor_pos: egui::Pos2::ZERO,
+            magnifier_pos: egui::Pos2::ZERO,
+            magnifier_offset: egui::vec2(30.0, 30.0),
+            should_close: false,
+            config,
+            initialized: false,
+        }
+    }
+    
     #[inline]
     fn get_color_at_cursor(&self) -> Option<egui::Color32> {
         let screenshot = self.screenshot.as_ref()?;
@@ -47,32 +75,31 @@ impl ColorPicker {
         Some(egui::Color32::from_rgba_premultiplied(pixel[0], pixel[1], pixel[2], 255))
     }
     
+    // OPTIMIZED: Non-blocking clipboard operations
     fn copy_to_clipboard(&self, color: egui::Color32) {
         let hex = format!("#{:02X}{:02X}{:02X}", color.r(), color.g(), color.b());
         
-        // First, save to history
-        match ColorHistory::load() {
-            Ok(mut history) => {
-                history.add_color(hex.clone(), (color.r(), color.g(), color.b()));
-                println!("💾 Saved to history: {}", hex);
-            }
-            Err(e) => {
-                eprintln!("Warning: Failed to load history: {}", e);
-                // Try to create new history
-                let mut history = ColorHistory::default();
-                history.add_color(hex.clone(), (color.r(), color.g(), color.b()));
-                println!("💾 Created new history and saved: {}", hex);
-            }
-        }
+        // Spawn background thread for all I/O operations
+        let hex_clone = hex.clone();
+        let color_rgb = (color.r(), color.g(), color.b());
         
-        // Then copy to clipboard
-        if let Ok(mut clipboard) = Clipboard::new() {
-            if let Err(e) = clipboard.set_text(&hex) {
-                eprintln!("Failed to copy to clipboard: {}", e);
-            } else {
-                println!("✅ Copied to clipboard: {}", hex);
+        std::thread::spawn(move || {
+            // Save to history
+            match ColorHistory::load() {
+                Ok(mut history) => {
+                    history.add_color(hex_clone.clone(), color_rgb);
+                }
+                Err(_) => {
+                    let mut history = ColorHistory::default();
+                    history.add_color(hex_clone.clone(), color_rgb);
+                }
             }
-        }
+            
+            // Copy to clipboard
+            if let Ok(mut clipboard) = Clipboard::new() {
+                clipboard.set_text(&hex_clone).ok();
+            }
+        });
     }
     
     #[inline]
@@ -113,35 +140,39 @@ impl ColorPicker {
         
         // Draw magnifier content
         if let Some(screenshot) = &self.screenshot {
+            // OPTIMIZED: Pre-calculate bounds to reduce repeated calculations
+            let center_x = self.cursor_pos.x as i32 + self.screenshot_offset.0;
+            let center_y = self.cursor_pos.y as i32 + self.screenshot_offset.1;
+            let width = screenshot.width() as i32;
+            let height = screenshot.height() as i32;
+            
             for dy in -zoom..=zoom {
                 for dx in -zoom..=zoom {
-                    let px = (self.cursor_pos.x as i32 + dx + self.screenshot_offset.0).max(0) as u32;
-                    let py = (self.cursor_pos.y as i32 + dy + self.screenshot_offset.1).max(0) as u32;
+                    let px = (center_x + dx).clamp(0, width - 1) as u32;
+                    let py = (center_y + dy).clamp(0, height - 1) as u32;
                     
-                    if px < screenshot.width() && py < screenshot.height() {
-                        let pixel = screenshot.get_pixel(px, py);
-                        let pixel_color = egui::Color32::from_rgb(pixel[0], pixel[1], pixel[2]);
-                        
-                        let cell_pos = mag_pos + egui::vec2(
-                            (dx + zoom) as f32 * pixel_size,
-                            (dy + zoom) as f32 * pixel_size,
+                    let pixel = screenshot.get_pixel(px, py);
+                    let pixel_color = egui::Color32::from_rgb(pixel[0], pixel[1], pixel[2]);
+                    
+                    let cell_pos = mag_pos + egui::vec2(
+                        (dx + zoom) as f32 * pixel_size,
+                        (dy + zoom) as f32 * pixel_size,
+                    );
+                    
+                    let cell_rect = egui::Rect::from_min_size(
+                        cell_pos,
+                        egui::vec2(pixel_size, pixel_size),
+                    );
+                    
+                    ui.painter().rect_filled(cell_rect, 0.0, pixel_color);
+                    
+                    // Highlight center pixel
+                    if dx == 0 && dy == 0 {
+                        ui.painter().rect_stroke(
+                            cell_rect,
+                            0.0,
+                            egui::Stroke::new(2.0, egui::Color32::RED),
                         );
-                        
-                        let cell_rect = egui::Rect::from_min_size(
-                            cell_pos,
-                            egui::vec2(pixel_size, pixel_size),
-                        );
-                        
-                        ui.painter().rect_filled(cell_rect, 0.0, pixel_color);
-                        
-                        // Highlight center pixel
-                        if dx == 0 && dy == 0 {
-                            ui.painter().rect_stroke(
-                                cell_rect,
-                                0.0,
-                                egui::Stroke::new(2.0, egui::Color32::RED),
-                            );
-                        }
                     }
                 }
             }
@@ -158,8 +189,10 @@ impl ColorPicker {
     fn draw_color_info(&self, ui: &mut egui::Ui, color: egui::Color32, mag_pos: egui::Pos2, mag_size: f32, info_height: f32) {
         let padding = 16.0;
         
-        // Calculate text dimensions
-        let mut formats = Vec::new();
+        // OPTIMIZED: Pre-allocate with exact capacity
+        let format_count = self.config.show_hex as usize + self.config.show_rgb as usize + self.config.show_hsl as usize;
+        let mut formats = Vec::with_capacity(format_count);
+        
         if self.config.show_hex {
             formats.push((
                 format!("#{:02X}{:02X}{:02X}", color.r(), color.g(), color.b()),
@@ -236,63 +269,53 @@ impl ColorPicker {
         let crosshair_size = 20.0;
         let shadow_layers = 12;
         
-        // Blurred shadow for horizontal line (centered, no offset)
+        // OPTIMIZED: Pre-calculate line endpoints
+        let h_start = self.cursor_pos + egui::vec2(-crosshair_size, 0.0);
+        let h_end = self.cursor_pos + egui::vec2(crosshair_size, 0.0);
+        let v_start = self.cursor_pos + egui::vec2(0.0, -crosshair_size);
+        let v_end = self.cursor_pos + egui::vec2(0.0, crosshair_size);
+        
+        // Blurred shadow for horizontal line
         for i in 0..shadow_layers {
             let progress = i as f32 / shadow_layers as f32;
             let alpha = (200.0 * (1.0 - progress.powf(0.8))) as u8;
             let stroke_width = 3.0 + progress * 4.0;
             
             ui.painter().line_segment(
-                [
-                    self.cursor_pos + egui::vec2(-crosshair_size, 0.0),
-                    self.cursor_pos + egui::vec2(crosshair_size, 0.0),
-                ],
+                [h_start, h_end],
                 egui::Stroke::new(stroke_width, egui::Color32::from_black_alpha(alpha / shadow_layers as u8)),
             );
         }
         
-        // Blurred shadow for vertical line (centered, no offset)
+        // Blurred shadow for vertical line
         for i in 0..shadow_layers {
             let progress = i as f32 / shadow_layers as f32;
             let alpha = (200.0 * (1.0 - progress.powf(0.8))) as u8;
             let stroke_width = 3.0 + progress * 4.0;
             
             ui.painter().line_segment(
-                [
-                    self.cursor_pos + egui::vec2(0.0, -crosshair_size),
-                    self.cursor_pos + egui::vec2(0.0, crosshair_size),
-                ],
+                [v_start, v_end],
                 egui::Stroke::new(stroke_width, egui::Color32::from_black_alpha(alpha / shadow_layers as u8)),
             );
         }
         
         // Crosshair
         let crosshair_color = egui::Color32::WHITE;
-        ui.painter().line_segment(
-            [
-                self.cursor_pos + egui::vec2(-crosshair_size, 0.0),
-                self.cursor_pos + egui::vec2(crosshair_size, 0.0),
-            ],
-            egui::Stroke::new(2.0, crosshair_color),
-        );
-        ui.painter().line_segment(
-            [
-                self.cursor_pos + egui::vec2(0.0, -crosshair_size),
-                self.cursor_pos + egui::vec2(0.0, crosshair_size),
-            ],
-            egui::Stroke::new(2.0, crosshair_color),
-        );
+        ui.painter().line_segment([h_start, h_end], egui::Stroke::new(2.0, crosshair_color));
+        ui.painter().line_segment([v_start, v_end], egui::Stroke::new(2.0, crosshair_color));
     }
 
+    #[inline]
     fn update_cursor_position(&mut self, ctx: &egui::Context) {
         if let Some(pos) = ctx.input(|i| i.pointer.hover_pos().or(i.pointer.latest_pos())) {
+            self.cursor_pos = pos;
             if !self.initialized {
                 self.initialized = true;
             }
-            self.cursor_pos = pos;
         }
     }
 
+    #[inline]
     fn update_magnifier_position(&mut self) {
         const MAX_DISTANCE: f32 = 150.0;
         const SMOOTHING: f32 = 0.15;
@@ -311,13 +334,9 @@ impl ColorPicker {
         self.magnifier_pos.y += (target_pos.y - self.magnifier_pos.y) * SMOOTHING;
     }
 
+    #[inline]
     fn handle_input(&mut self, ctx: &egui::Context) -> bool {
-        // Check for escape key
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            return true;
-        }
-        
-        // Check for click
+        // OPTIMIZED: Check click first (more common action)
         if ctx.input(|i| i.pointer.primary_clicked()) {
             if let Some(color) = self.get_color_at_cursor() {
                 self.copy_to_clipboard(color);
@@ -325,11 +344,13 @@ impl ColorPicker {
             }
         }
         
-        false
+        // Check for escape key
+        ctx.input(|i| i.key_pressed(egui::Key::Escape))
     }
 }
 
 impl eframe::App for ColorPicker {
+    #[inline]
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         egui::Rgba::TRANSPARENT.to_array()
     }
@@ -361,11 +382,10 @@ impl eframe::App for ColorPicker {
                 if let Some(color) = self.get_color_at_cursor() {
                     let mag_size = self.config.preview_size as f32;
                     
-                    // Calculate info height
-                    let mut line_count = 0;
-                    if self.config.show_hex { line_count += 1; }
-                    if self.config.show_rgb { line_count += 1; }
-                    if self.config.show_hsl { line_count += 1; }
+                    // OPTIMIZED: Calculate line count using boolean arithmetic
+                    let line_count = self.config.show_hex as usize 
+                        + self.config.show_rgb as usize 
+                        + self.config.show_hsl as usize;
                     let info_height = if line_count > 0 { 
                         15.0 + (line_count as f32 * 20.0) 
                     } else { 
@@ -397,13 +417,12 @@ impl eframe::App for ColorPicker {
 
 // Helper function to draw a blurred shadow
 fn draw_blurred_shadow(ui: &mut egui::Ui, rect: egui::Rect, rounding: f32, blur_radius: f32, offset: egui::Vec2) {
-    let shadow_layers = 16; // Increased layers for smoother blur
+    let shadow_layers = 16;
     let max_alpha = 160;
     
     for i in 0..shadow_layers {
         let progress = i as f32 / shadow_layers as f32;
         let current_blur = blur_radius * progress;
-        // Use power function for smoother falloff
         let alpha = (max_alpha as f32 * (1.0 - progress.powf(0.7))) as u8;
         
         let expanded_rect = rect.expand(current_blur).translate(offset);
@@ -450,7 +469,7 @@ fn rgb_to_hsl(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
     (h, s, l)
 }
 
-fn capture_all_screens() -> (Option<RgbaImage>, (i32, i32)) {
+pub fn capture_all_screens() -> (Option<RgbaImage>, (i32, i32)) {
     if let Ok(monitors) = Monitor::all() {
         if let Some(monitor) = monitors.first() {
             if let Ok(image) = monitor.capture_image() {
