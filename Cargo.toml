@@ -27,6 +27,9 @@ dirs = "5.0"
 # Global hotkey support
 global-hotkey = "0.6"
 
+# Time stamping in history
+chrono = "0.4"
+
 [profile.release]
 opt-level = 3
 lto = true

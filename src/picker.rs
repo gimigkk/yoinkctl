@@ -3,6 +3,7 @@ use xcap::Monitor;
 use image::RgbaImage;
 use arboard::Clipboard;
 use crate::config::Config;
+use crate::history::ColorHistory;
 
 pub struct ColorPicker {
     screenshot: Option<RgbaImage>,
@@ -49,6 +50,22 @@ impl ColorPicker {
     fn copy_to_clipboard(&self, color: egui::Color32) {
         let hex = format!("#{:02X}{:02X}{:02X}", color.r(), color.g(), color.b());
         
+        // First, save to history
+        match ColorHistory::load() {
+            Ok(mut history) => {
+                history.add_color(hex.clone(), (color.r(), color.g(), color.b()));
+                println!("💾 Saved to history: {}", hex);
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to load history: {}", e);
+                // Try to create new history
+                let mut history = ColorHistory::default();
+                history.add_color(hex.clone(), (color.r(), color.g(), color.b()));
+                println!("💾 Created new history and saved: {}", hex);
+            }
+        }
+        
+        // Then copy to clipboard
         if let Ok(mut clipboard) = Clipboard::new() {
             if let Err(e) = clipboard.set_text(&hex) {
                 eprintln!("Failed to copy to clipboard: {}", e);
